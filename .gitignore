@@ -5,6 +5,7 @@ API key.txt
 # ---- Python ----
 __pycache__/
 *.pyc
+*.log
 .venv/
 venv/
 
