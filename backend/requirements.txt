@@ -9,7 +9,11 @@ openai>=1.40
 langchain-openai>=0.3
 langgraph>=0.2
 # 知识库 RAG（里程碑 4，CPU-only）
-torch>=2.2          # CPU 版：pip install torch --index-url https://download.pytorch.org/whl/cpu
+# torch 不在此处：本地 Windows 手动装 CPU 版（见下注释）；
+# Render 等 Linux 平台在 Build Command 里先装 torch CPU 版，再装本文件
+# （避免 pip 从 PyPI 拉到含 CUDA 的数 GB 包）：
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
 sentence-transformers>=3.0
 chromadb>=0.5
 pypdf>=4.0

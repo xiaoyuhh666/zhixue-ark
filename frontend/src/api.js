@@ -1,7 +1,11 @@
 /* 后端 API 封装：REST + SSE（fetch + ReadableStream 手动解析） */
 
+/* 后端基地址：开发/本地部署留空走同域；GitHub Pages 等分离部署时
+   通过构建环境变量 VITE_API_BASE 指向后端（如 https://xxx.onrender.com） */
+const API_BASE = import.meta.env.VITE_API_BASE || ''
+
 async function request(url, options = {}) {
-  const res = await fetch(url, options)
+  const res = await fetch(API_BASE + url, options)
   if (!res.ok) {
     // 优先透出后端 HTTPException 的 detail（如「用户名或密码错误」）
     let msg = `请求失败（HTTP ${res.status}）`
@@ -129,7 +133,7 @@ export function getKbChunks(id) {
 export function uploadKbDoc(file, onProgress, category = 'general') {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', '/api/kb/upload')
+    xhr.open('POST', `${API_BASE}/api/kb/upload`)
     xhr.responseType = 'json'
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total)
@@ -223,7 +227,7 @@ export function clearDemoData() {
  * 帧格式 `data: {json}\n\n`，逐帧回调 onEvent。
  */
 export async function streamChat(payload, onEvent, signal) {
-  const res = await fetch('/api/chat', {
+  const res = await fetch(`${API_BASE}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
