@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import 'element-plus/es/components/message/style/css'
+import { Analytics } from '@vercel/analytics/vue'
 import TopNav from './components/TopNav.vue'
 import LandingView from './components/LandingView.vue'
 import ChatConfig from './components/ChatConfig.vue'
@@ -358,7 +359,7 @@ async function sendMessage(text) {
         } else if (ev.type === 'plan') {
           // 任务规划（里程碑 6）：构建任务链时间线；存 tasks 供「转为计划」按钮（任务计划中心）
           aiMsg.plan = { tasks: ev.tasks || [] }
-          aiMsg.agent = (ev.tasks?.length > 1) ? '多智能体协作' : (ev.tasks?.[0]?.label || '智学方舟')
+          aiMsg.agent = (ev.tasks?.length > 1) ? '��智能体协作' : (ev.tasks?.[0]?.label || '智��方舟')
           aiMsg.reason = ev.reason || ''
           const route = aiMsg.steps.find(s => s.key === 'route')
           if (route) route.status = 'done'
@@ -572,6 +573,8 @@ onBeforeUnmount(() => {
   </div>
   <!-- 登录 / 注册弹窗：未登录点击任何进入平台的入口时弹出 -->
   <AuthModal v-if="showAuth" @close="showAuth = false" @success="authSuccess" />
+  <!-- Vercel Web Analytics -->
+  <Analytics />
 </template>
 
 <style scoped>
