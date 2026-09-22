@@ -1,0 +1,52 @@
+/* =====================================================
+   视觉基调：白色柔粉编辑部（自 prototype.html 提取）
+   纯白底 / 浅灰细线 / 大圆角 / 黑色胶囊主按钮 / 柔粉单点睛
+   ===================================================== */
+:root {
+  --bg: #ffffff;            /* 页面底色 */
+  --surface: #f7f7f8;       /* 面板底色 */
+  --surface-2: #f1f1f4;     /* 悬浮底色 */
+  --line: #e9e9ee;          /* 细分割线 */
+  --text: #141416;          /* 主文字（近黑） */
+  --muted: #6f6f78;         /* 次要文字 */
+  --dim: #a6a6b0;           /* 弱化文字 */
+  --pink: #f7a8c4;          /* 柔粉：填充 */
+  --pink-soft: #fce4ee;     /* 更浅粉：气泡/底色 */
+  --accent: #d6437f;        /* 深粉：文字与交互态（唯一点睛色相） */
+  --r-sm: 10px;
+  --r-md: 16px;
+  --r-lg: 22px;
+  --r-full: 999px;
+  --shadow: 0 1px 2px rgba(20, 20, 22, .04);
+  --shadow-hover: 0 14px 34px rgba(20, 20, 22, .08);
+  --sans: "Helvetica Neue", Helvetica, "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif;
+  --mono: "SF Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #app { height: 100%; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, textarea, select { font-family: inherit; }
+.mono { font-family: var(--mono); }
+
+/* 落地页模式：放开 window 原生滚动（LandingView 挂载时加类，卸载时移除） */
+body.landing-mode { overflow: auto; height: auto; }
+body.landing-mode #app { height: auto; }
+
+/* 动效（与 prototype 一致） */
+@keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+@keyframes blink { 50% { opacity: 0; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: #dcdce2; border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }

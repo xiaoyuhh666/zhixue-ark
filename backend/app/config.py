@@ -1,0 +1,98 @@
+"""全局配置：读取 backend/.env，管理各家用 LLM 供应商的接入参数。"""
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic_settings import BaseSettings
+
+# backend/ 目录（.env 与数据文件都相对它定位）
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+class Settings(BaseSettings):
+    # ---- 应用 ----
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    DATABASE_URL: str = f"sqlite:///{(BASE_DIR / 'data' / 'app.db').as_posix()}"
+
+    # ---- LLM（OpenAI 兼容协议）----
+    LLM_PROVIDER: str = "deepseek"  # deepseek | qwen | glm
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    QWEN_API_KEY: str = ""
+    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    QWEN_MODEL: str = "qwen-plus"
+    GLM_API_KEY: str = ""
+    GLM_BASE_URL: str = "https://open.bigmodel.cn/api/paas/v4"
+    GLM_MODEL: str = "glm-4-flash"
+    FALLBACK_PROVIDER: str = "glm"  # 免费兜底供应商：所选模型未接入时自动切换
+
+    # ---- 知识库 RAG（里程碑 4，CPU-only）----
+    KB_EMBED_MODEL: str = "BAAI/bge-m3"  # HuggingFace 嵌入模型，可换 bge-small-zh-v1.5 提速
+    KB_CHUNK_SIZE: int = 500  # 每块目标字符数
+    KB_CHUNK_OVERLAP: int = 80  # 相邻块重叠字符数
+    KB_TOP_K: int = 3  # 检索返回条数
+    KB_MIN_SCORE: float = 0.35  # 相似度阈值，低于此值不作为引用（归一化余弦）
+    CHROMA_DIR: str = f"{(BASE_DIR / 'data' / 'chroma').as_posix()}"
+
+    model_config = {"env_file": str(BASE_DIR / ".env"), "extra": "ignore"}
+
+    def provider_config(self, provider: str | None = None) -> tuple[str, str, str]:
+        """返回指定供应商的 (api_key, base_url, model)，缺省回落到 LLM_PROVIDER。"""
+        p = (provider or self.LLM_PROVIDER).lower()
+        prefix = f"{p.upper()}_"
+        return (
+            getattr(self, f"{prefix}API_KEY", ""),
+            getattr(self, f"{prefix}BASE_URL", ""),
+            getattr(self, f"{prefix}MODEL", ""),
+        )
+
+
+# 供应商中文名，用于消息记录与前端展示
+PROVIDER_LABELS = {"deepseek": "DeepSeek", "qwen": "Qwen", "glm": "GLM"}
+
+# 模型广场目录：每家供应商的展示元数据（上下文窗口、能力标签、计费档位等）
+# 接新模型只改这一个字典；运行时 Key 配置与切换由 settings.py / runtime_settings.py 负责
+MODEL_CATALOG: dict[str, dict] = {
+    "deepseek": {
+        "name": "DeepSeek",
+        "logo": "D",
+        "model": "deepseek-chat",
+        "endpoint": "https://api.deepseek.com/v1",
+        "context": "128K",
+        "streaming": True,
+        "function_calling": True,
+        "pricing": "付费 · 低成本",
+        "tags": ["主力推荐", "低成本"],
+        "console": "https://platform.deepseek.com",
+    },
+    "qwen": {
+        "name": "通义千问 Qwen",
+        "logo": "Q",
+        "model": "qwen-plus",
+        "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "context": "128K",
+        "streaming": True,
+        "function_calling": True,
+        "pricing": "赠金额度",
+        "tags": ["100 万赠金", "BYOK"],
+        "console": "https://bailian.console.aliyun.com",
+    },
+    "glm": {
+        "name": "智谱 GLM",
+        "logo": "G",
+        "model": "glm-4-flash",
+        "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+        "context": "128K",
+        "streaming": True,
+        "function_calling": True,
+        "pricing": "永久免费",
+        "tags": ["永久免费", "免费兜底"],
+        "console": "https://open.bigmodel.cn",
+    },
+}
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

@@ -1,0 +1,17 @@
+# 智学方舟 后端依赖
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+sqlalchemy>=2.0
+pydantic>=2.7
+pydantic-settings>=2.3
+openai>=1.40
+langchain-openai>=0.3
+langgraph>=0.2
+# 知识库 RAG（里程碑 4，CPU-only）
+torch>=2.2          # CPU 版：pip install torch --index-url https://download.pytorch.org/whl/cpu
+sentence-transformers>=3.0
+chromadb>=0.5
+pypdf>=4.0
+python-docx>=1.1
+python-pptx>=0.6
