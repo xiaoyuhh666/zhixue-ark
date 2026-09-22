@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Conversation, Memory, Message
+from .auth import get_current_user
 
 router = APIRouter(prefix="/api/insights", tags=["insights"])
 
@@ -18,12 +19,17 @@ _WEAK_KEYWORDS = ["薄弱", "不熟", "不会", "困难", "吃力", "没掌握",
 
 
 @router.get("")
-def get_insights(db: Session = Depends(get_db)):
-    # 近 14 天逐日用户消息量（含今天）
+def get_insights(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    # 近 14 天逐日用户消息量（含今天；消息经会话归属当前用户）
     since = datetime.now() - timedelta(days=13)
     rows = (
         db.query(Message.created_at, func.count(Message.id))
-        .filter(Message.role == "user", Message.created_at >= since.replace(hour=0, minute=0))
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .filter(
+            Message.role == "user",
+            Conversation.user_id == user.id,
+            Message.created_at >= since.replace(hour=0, minute=0),
+        )
         .group_by(func.date(Message.created_at))
         .all()
     )
@@ -33,10 +39,11 @@ def get_insights(db: Session = Depends(get_db)):
         d = (datetime.now() - timedelta(days=13 - i)).strftime("%Y-%m-%d")
         daily.append({"date": d[5:], "count": by_date.get(d, 0)})
 
-    # 五智能体使用分布（assistant 消息，去掉「·」后缀归组，排除调度类）
+    # 五智能体使用分布（当前用户 assistant 消息，去「·」后缀归组，排除调度类）
     agent_rows = (
         db.query(Message.agent, func.count(Message.id))
-        .filter(Message.role == "assistant")
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .filter(Message.role == "assistant", Conversation.user_id == user.id)
         .group_by(Message.agent)
         .all()
     )
@@ -48,23 +55,34 @@ def get_insights(db: Session = Depends(get_db)):
         merged[key] = merged.get(key, 0) + cnt
     agents = [{"name": k, "count": v} for k, v in sorted(merged.items(), key=lambda x: -x[1])]
 
-    # 引用命中：assistant 消息带 citations 的条数与片段总数
-    cites = db.query(Message.citations).filter(
-        Message.role == "assistant", Message.citations.isnot(None)
-    ).all()
+    # 引用命中：当前用户 assistant 消息带 citations 的条数与片段总数
+    cites = (
+        db.query(Message.citations)
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .filter(
+            Message.role == "assistant",
+            Conversation.user_id == user.id,
+            Message.citations.isnot(None),
+        )
+        .all()
+    )
     cite_msgs = len(cites)
     cite_snippets = sum(len(c[0] or []) for c in cites)
 
     # 活跃天数：发过消息的不同日期数
-    days = db.query(func.count(func.distinct(func.date(Message.created_at)))).filter(
-        Message.role == "user"
-    ).scalar() or 0
+    days = (
+        db.query(func.count(func.distinct(func.date(Message.created_at))))
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .filter(Message.role == "user", Conversation.user_id == user.id)
+        .scalar()
+        or 0
+    )
 
     # 薄弱点标签云：从长期记忆聚合学习薄弱点（呼应「0 次重复自我介绍」的记忆卖点）
     weak_rows = (
         db.query(Memory)
         .filter(
-            Memory.user_id == 1,
+            Memory.user_id == user.id,
             or_(*[Memory.content.contains(k) for k in _WEAK_KEYWORDS]),
         )
         .order_by(Memory.id.desc())
@@ -87,7 +105,12 @@ def get_insights(db: Session = Depends(get_db)):
         "citations_msgs": cite_msgs,
         "citations_snippets": cite_snippets,
         "active_days": days,
-        "total_conversations": db.query(Conversation).count(),
-        "total_messages": db.query(Message).count(),
+        "total_conversations": db.query(Conversation).filter_by(user_id=user.id).count(),
+        "total_messages": (
+            db.query(Message)
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .filter(Conversation.user_id == user.id)
+            .count()
+        ),
         "weak_points": weak_points,
     }

@@ -1,9 +1,9 @@
-"""账号认证（毕设演示级）：注册 / 登录 / 当前用户。
+"""账号认证：注册 / 登录 / 当前用户 / 鉴权依赖。
 
 - 密码：PBKDF2-SHA256 哈希存储（salt$digest），无明文
 - Token：HMAC 签名的自包含串（base64 payload + 签名，7 天有效），无需存表
-- 演示阶段数据层仍为单用户（user_id=1），auth 负责登录门禁与身份展示；
-  多用户数据隔离作为后续里程碑
+- 数据隔离：所有业务接口通过 get_current_user 依赖解出真实用户，
+  会话/文档/计划/记忆/画像全部按 user_id 隔离（2026-09-22 多用户改造）
 """
 import base64
 import hashlib
@@ -87,16 +87,21 @@ def _validate(body: AuthBody) -> None:
         raise HTTPException(400, "密码至少 6 位")
 
 
-def _sync_profile_nickname(db: Session, nickname: str) -> None:
-    """把账号昵称同步到画像行（user_id=1）：全站展示名与注册信息保持一致。
+def get_current_user(
+    authorization: str = Header(default=""), db: Session = Depends(get_db)
+) -> User:
+    """鉴权依赖：从 Authorization 头解出 token，校验签名与有效期，返回当前用户。
 
-    数据层演示阶段为单用户（画像/记忆/计划均挂 id=1），画像昵称默认是 seed 值；
-    登录/注册成功后同步为账号昵称，保证右上角、画像卡与智能体称呼统一。
+    所有需要按用户隔离的业务接口挂此依赖（FastAPI 自动透传 401）。
     """
-    profile = db.get(User, 1)
-    if profile and nickname and profile.nickname != nickname:
-        profile.nickname = nickname[:64]
-        db.commit()
+    token = authorization.removeprefix("Bearer ").strip()
+    name = _parse_token(token)
+    if not name:
+        raise HTTPException(401, "登录已过期，请重新登录")
+    u = db.query(User).filter(User.username == name).first()
+    if u is None:
+        raise HTTPException(401, "登录不存在，请重新登录")
+    return u
 
 
 @router.post("/register")
@@ -112,7 +117,7 @@ def register(body: AuthBody, db: Session = Depends(get_db)):
     )
     db.add(u)
     db.commit()
-    _sync_profile_nickname(db, u.nickname or name)
+    db.refresh(u)
     return {"token": _make_token(name), "user": _user_dict(u)}
 
 
@@ -121,17 +126,9 @@ def login(body: AuthBody, db: Session = Depends(get_db)):
     u = db.query(User).filter(User.username == body.username.strip()).first()
     if not u or not _verify_password(body.password, u.password_hash):
         raise HTTPException(400, "用户名或密码错误")
-    _sync_profile_nickname(db, u.nickname or u.username)
     return {"token": _make_token(u.username), "user": _user_dict(u)}
 
 
 @router.get("/me")
-def me(authorization: str = Header(default=""), db: Session = Depends(get_db)):
-    token = authorization.removeprefix("Bearer ").strip()
-    name = _parse_token(token)
-    if not name:
-        raise HTTPException(401, "登录已过期，请重新登录")
-    u = db.query(User).filter(User.username == name).first()
-    if not u:
-        raise HTTPException(401, "用户不存在")
-    return {"user": _user_dict(u)}
+def me(user: User = Depends(get_current_user)):
+    return {"user": _user_dict(user)}

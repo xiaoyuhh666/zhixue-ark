@@ -5,7 +5,8 @@
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
 async function request(url, options = {}) {
-  const res = await fetch(API_BASE + url, options)
+  const res = await fetch(API_BASE + url, withAuth(options))
+  if (res.status === 401) return handle401() // 登录过期：清态回落地页重登
   if (!res.ok) {
     // 优先透出后端 HTTPException 的 detail（如「用户名或密码错误」）
     let msg = `请求失败（HTTP ${res.status}）`
@@ -18,8 +19,28 @@ async function request(url, options = {}) {
   return res.json()
 }
 
-export function getConversations() {
-  return request('/api/conversations')
+/* ---- 登录态注入：所有业务请求统一携带 Bearer token ---- */
+
+function getToken() {
+  const saved = JSON.parse(localStorage.getItem('ark_user') || 'null')
+  return saved?.token || ''
+}
+
+function authHeaders() {
+  const token = getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+/* 给 fetch/XHR options 注入鉴权头（headers 为 undefined 或普通对象均可） */
+function withAuth(options = {}) {
+  return { ...options, headers: { ...(options.headers || {}), ...authHeaders() } }
+}
+
+/* 401 统一处理：清掉失效登录态并回到落地页，用户重新登录 */
+function handle401() {
+  localStorage.removeItem('ark_user')
+  location.reload()
+  throw new Error('登录已过期，请重新登录')
 }
 
 /* ---- 账号认证（登录 / 注册）---- */
@@ -45,6 +66,10 @@ export function getMe() {
   return request('/api/auth/me', {
     headers: saved?.token ? { Authorization: `Bearer ${saved.token}` } : {}
   }).then(d => d.user)
+}
+
+export function getConversations() {
+  return request('/api/conversations')
 }
 
 export function getConversation(id) {
@@ -135,6 +160,8 @@ export function uploadKbDoc(file, onProgress, category = 'general') {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', `${API_BASE}/api/kb/upload`)
     xhr.responseType = 'json'
+    const auth = authHeaders()
+    if (auth.Authorization) xhr.setRequestHeader('Authorization', auth.Authorization)
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total)
     }
@@ -229,10 +256,11 @@ export function clearDemoData() {
 export async function streamChat(payload, onEvent, signal) {
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),
     signal
   })
+  if (res.status === 401) return handle401() // 登录过期：清态回落地页重登
   if (!res.ok) throw new Error(`请求失败（HTTP ${res.status}）`)
   if (!res.body) throw new Error('当前浏览器不支持流式响应')
 

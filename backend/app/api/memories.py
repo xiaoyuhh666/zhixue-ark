@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Memory
+from .auth import get_current_user
 
 router = APIRouter(prefix="/api/memories", tags=["memories"])
 
@@ -15,9 +16,9 @@ class MemoryCreate(BaseModel):
 
 
 @router.get("")
-def list_memories(q: str = "", db: Session = Depends(get_db)):
+def list_memories(q: str = "", user=Depends(get_current_user), db: Session = Depends(get_db)):
     """记忆列表；q 为可选关键词过滤。"""
-    query = db.query(Memory).filter_by(user_id=1)
+    query = db.query(Memory).filter_by(user_id=user.id)
     if q.strip():
         query = query.filter(Memory.content.contains(q.strip()))
     mems = query.order_by(Memory.id.desc()).limit(200).all()
@@ -34,19 +35,19 @@ def list_memories(q: str = "", db: Session = Depends(get_db)):
 
 
 @router.post("")
-def create_memory(body: MemoryCreate, db: Session = Depends(get_db)):
+def create_memory(body: MemoryCreate, user=Depends(get_current_user), db: Session = Depends(get_db)):
     content = body.content.strip()
     if not content:
         raise HTTPException(status_code=400, detail="记忆内容不能为空")
     # 去重：内容完全一致的记忆只保留一条
     exists = (
         db.query(Memory)
-        .filter_by(user_id=1, content=content)
+        .filter_by(user_id=user.id, content=content)
         .first()
     )
     if exists:
         return {"ok": True, "created": False, "id": exists.id}
-    mem = Memory(user_id=1, content=content[:120], tag=body.tag[:32])
+    mem = Memory(user_id=user.id, content=content[:120], tag=body.tag[:32])
     db.add(mem)
     db.commit()
     db.refresh(mem)
@@ -54,8 +55,12 @@ def create_memory(body: MemoryCreate, db: Session = Depends(get_db)):
 
 
 @router.delete("/{memory_id}")
-def delete_memory(memory_id: int, db: Session = Depends(get_db)):
-    mem = db.get(Memory, memory_id)
+def delete_memory(memory_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    mem = (
+        db.query(Memory)
+        .filter(Memory.id == memory_id, Memory.user_id == user.id)
+        .first()
+    )
     if mem is None:
         raise HTTPException(status_code=404, detail="记忆不存在")
     db.delete(mem)

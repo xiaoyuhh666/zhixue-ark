@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..db import get_db
 from ..models import Conversation, Message
+from .auth import get_current_user
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -24,8 +25,13 @@ def _summary(conv: Conversation) -> dict:
 
 
 @router.get("")
-def list_conversations(db: Session = Depends(get_db)):
-    convs = db.query(Conversation).order_by(Conversation.updated_at.desc()).all()
+def list_conversations(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    convs = (
+        db.query(Conversation)
+        .filter(Conversation.user_id == user.id)
+        .order_by(Conversation.updated_at.desc())
+        .all()
+    )
     # 批量取每个会话最后一条消息做列表摘要（两条查询搞定，避免逐会话 N+1）
     last_map: dict[int, Message] = {}
     if convs:
@@ -50,8 +56,8 @@ def list_conversations(db: Session = Depends(get_db)):
 
 
 @router.post("")
-def create_conversation(body: ConversationCreate, db: Session = Depends(get_db)):
-    conv = Conversation(user_id=1, title=body.title[:128])
+def create_conversation(body: ConversationCreate, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    conv = Conversation(user_id=user.id, title=body.title[:128])
     db.add(conv)
     db.commit()
     db.refresh(conv)
@@ -59,11 +65,11 @@ def create_conversation(body: ConversationCreate, db: Session = Depends(get_db))
 
 
 @router.get("/{conv_id}")
-def get_conversation(conv_id: int, db: Session = Depends(get_db)):
+def get_conversation(conv_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
     conv = (
         db.query(Conversation)
         .options(joinedload(Conversation.messages))
-        .filter(Conversation.id == conv_id)
+        .filter(Conversation.id == conv_id, Conversation.user_id == user.id)
         .first()
     )
     if conv is None:
@@ -86,8 +92,12 @@ def get_conversation(conv_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/{conv_id}")
-def delete_conversation(conv_id: int, db: Session = Depends(get_db)):
-    conv = db.get(Conversation, conv_id)
+def delete_conversation(conv_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    conv = (
+        db.query(Conversation)
+        .filter(Conversation.id == conv_id, Conversation.user_id == user.id)
+        .first()
+    )
     if conv is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     db.delete(conv)  # messages 通过 cascade 一起删除

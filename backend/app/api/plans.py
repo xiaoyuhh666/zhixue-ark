@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Plan
+from .auth import get_current_user
 
 router = APIRouter(prefix="/api/plans", tags=["plans"])
 
@@ -49,15 +50,21 @@ def _serialize(p: Plan) -> dict:
 
 
 @router.get("")
-def list_plans(db: Session = Depends(get_db)):
-    plans = db.query(Plan).filter_by(user_id=1).order_by(Plan.updated_at.desc()).limit(200).all()
+def list_plans(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    plans = (
+        db.query(Plan)
+        .filter_by(user_id=user.id)
+        .order_by(Plan.updated_at.desc())
+        .limit(200)
+        .all()
+    )
     return [_serialize(p) for p in plans]
 
 
 @router.post("")
-def create_plan(body: PlanCreate, db: Session = Depends(get_db)):
+def create_plan(body: PlanCreate, user=Depends(get_current_user), db: Session = Depends(get_db)):
     plan = Plan(
-        user_id=1,
+        user_id=user.id,
         title=body.title.strip()[:128] or "新计划",
         deadline=body.deadline.strip()[:32],
         category=body.category if body.category in PLAN_CATEGORIES else "general",
@@ -71,8 +78,12 @@ def create_plan(body: PlanCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/{plan_id}")
-def update_plan(plan_id: int, body: PlanUpdate, db: Session = Depends(get_db)):
-    plan = db.get(Plan, plan_id)
+def update_plan(plan_id: int, body: PlanUpdate, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    plan = (
+        db.query(Plan)
+        .filter(Plan.id == plan_id, Plan.user_id == user.id)
+        .first()
+    )
     if plan is None:
         raise HTTPException(status_code=404, detail="计划不存在")
     if body.title is not None:
@@ -87,8 +98,12 @@ def update_plan(plan_id: int, body: PlanUpdate, db: Session = Depends(get_db)):
 
 
 @router.delete("/{plan_id}")
-def delete_plan(plan_id: int, db: Session = Depends(get_db)):
-    plan = db.get(Plan, plan_id)
+def delete_plan(plan_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    plan = (
+        db.query(Plan)
+        .filter(Plan.id == plan_id, Plan.user_id == user.id)
+        .first()
+    )
     if plan is None:
         raise HTTPException(status_code=404, detail="计划不存在")
     db.delete(plan)

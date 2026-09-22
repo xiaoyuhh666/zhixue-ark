@@ -19,6 +19,18 @@ ALLOWED_KEYS = {
 }
 
 
+def _allowed(key: str) -> bool:
+    """键白名单校验：裸键或用户级键（"u{id}:deepseek_api_key"）均按冒号后裸键判定。"""
+    if key in ALLOWED_KEYS:
+        return True
+    return ":" in key and key.split(":", 1)[1] in ALLOWED_KEYS
+
+
+def user_scope(user_id: int, key: str) -> str:
+    """把裸键加上用户前缀，实现 BYOK（用户自配 Key）按账号隔离。"""
+    return f"u{user_id}:{key}"
+
+
 def _load_all() -> None:
     global _loaded
     with _lock:
@@ -30,7 +42,7 @@ def _load_all() -> None:
         try:
             with SessionLocal() as db:
                 for row in db.query(PlatformSetting).all():
-                    if row.key in ALLOWED_KEYS:
+                    if _allowed(row.key):
                         _cache[row.key] = row.value
         except Exception:
             pass  # 表尚未建好时静默，回落 .env
@@ -39,7 +51,7 @@ def _load_all() -> None:
 
 def get_setting(key: str, default: str = "") -> str:
     """读运行时设置（带缓存）；无则返回 default（调用方再回落 .env）。"""
-    if key not in ALLOWED_KEYS:
+    if not _allowed(key):
         return default
     _load_all()
     return _cache.get(key, default)
@@ -55,7 +67,7 @@ def set_settings(items: dict[str, str]) -> None:
 
         with SessionLocal() as db:
             for k, v in items.items():
-                if k not in ALLOWED_KEYS:
+                if not _allowed(k):
                     continue
                 v = str(v or "").strip()
                 row = db.query(PlatformSetting).filter_by(key=k).first()

@@ -7,7 +7,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Conversation, KnowledgeDoc, Memory, Message, User
+from ..models import Conversation, KnowledgeDoc, Memory, Message
+from .auth import get_current_user
 
 router = APIRouter(prefix="/api/profile", tags=["profile"])
 
@@ -47,21 +48,12 @@ class ProfileUpdate(BaseModel):
     goals: list[str] | None = None
 
 
-def _get_user(db: Session) -> User:
-    user = db.get(User, 1)  # 单用户演示系统
-    if user is None:
-        user = User(username="demo", nickname="同学")
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    return user
-
-
-def _top_agent(db: Session) -> tuple[str, int]:
-    """最常用智能体：assistant 消息按 agent 计数（去掉「·」后缀归组，排除调度类标签）。"""
+def _top_agent(db: Session, user_id: int) -> tuple[str, int]:
+    """最常用智能体：当前用户的 assistant 消息按 agent 计数（去「·」后缀，排除调度类）。"""
     rows = (
         db.query(Message.agent, func.count(Message.id))
-        .filter(Message.role == "assistant")
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .filter(Message.role == "assistant", Conversation.user_id == user_id)
         .group_by(Message.agent)
         .all()
     )
@@ -78,9 +70,8 @@ def _top_agent(db: Session) -> tuple[str, int]:
 
 
 @router.get("")
-def get_profile(db: Session = Depends(get_db)):
-    user = _get_user(db)
-    top_agent, top_count = _top_agent(db)
+def get_profile(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    top_agent, top_count = _top_agent(db, user.id)
     return {
         "nickname": user.nickname,
         "major": user.major,
@@ -90,17 +81,16 @@ def get_profile(db: Session = Depends(get_db)):
         "weekly_hours": user.weekly_hours or 0,
         "interests": user.interests or [],
         "goals": user.goals or [],
-        "memory_count": db.query(Memory).filter_by(user_id=1).count(),
-        "conversation_count": db.query(Conversation).filter_by(user_id=1).count(),
-        "doc_count": db.query(KnowledgeDoc).filter_by(user_id=1).count(),
+        "memory_count": db.query(Memory).filter_by(user_id=user.id).count(),
+        "conversation_count": db.query(Conversation).filter_by(user_id=user.id).count(),
+        "doc_count": db.query(KnowledgeDoc).filter_by(user_id=user.id).count(),
         "top_agent": top_agent,
         "top_agent_count": top_count,
     }
 
 
 @router.put("")
-def update_profile(body: ProfileUpdate, db: Session = Depends(get_db)):
-    user = _get_user(db)
+def update_profile(body: ProfileUpdate, user=Depends(get_current_user), db: Session = Depends(get_db)):
     if body.nickname is not None:
         user.nickname = body.nickname.strip()[:64]
     if body.major is not None:
@@ -122,13 +112,23 @@ def update_profile(body: ProfileUpdate, db: Session = Depends(get_db)):
 
 
 @router.post("/extract")
-def extract_candidates(db: Session = Depends(get_db)):
+def extract_candidates(user=Depends(get_current_user), db: Session = Depends(get_db)):
     """从最近对话 + 长期记忆提炼画像候选（只返回候选，由用户勾选后合入，不直接写入）。"""
-    user = _get_user(db)
     msgs = (
-        db.query(Message).filter(Message.role == "user").order_by(Message.id.desc()).limit(20).all()
+        db.query(Message)
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .filter(Message.role == "user", Conversation.user_id == user.id)
+        .order_by(Message.id.desc())
+        .limit(20)
+        .all()
     )
-    mems = db.query(Memory).filter_by(user_id=1).order_by(Memory.id.desc()).limit(10).all()
+    mems = (
+        db.query(Memory)
+        .filter_by(user_id=user.id)
+        .order_by(Memory.id.desc())
+        .limit(10)
+        .all()
+    )
     corpus = " ".join(m.content for m in msgs) + " " + " ".join(m.content for m in mems)
 
     def _pick(rules, existing):

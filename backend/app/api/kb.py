@@ -1,10 +1,11 @@
-"""知识库接口（里程碑 4）：上传 / 列表 / 删除，向量与元数据联动。"""
+"""知识库接口：上传 / 列表 / 检索试验台 / 删除，向量与元数据联动，按用户隔离。"""
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import KnowledgeDoc
 from ..services import kb
+from .auth import get_current_user
 
 router = APIRouter(prefix="/api/kb", tags=["kb"])
 
@@ -19,6 +20,7 @@ ALLOWED_CATEGORIES = {"study", "competition", "research", "career", "life", "gen
 async def upload(
     file: UploadFile,
     category: str = Form("general"),
+    user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """上传文档：保存元数据 -> 解析分块 -> 向量入库（同步完成，演示文档体量小）。
@@ -36,7 +38,7 @@ async def upload(
         raise HTTPException(status_code=400, detail="文件超过 10MB 上限")
 
     # 先落一条元数据记录，解析失败也能在列表里看到原因
-    doc = KnowledgeDoc(user_id=1, filename=filename, ext=ext, category=category, status="processing")
+    doc = KnowledgeDoc(user_id=user.id, filename=filename, ext=ext, category=category, status="processing")
     db.add(doc)
     db.commit()
     db.refresh(doc)
@@ -56,15 +58,25 @@ async def upload(
 
 
 @router.get("/documents")
-def list_documents(db: Session = Depends(get_db)):
-    docs = db.query(KnowledgeDoc).order_by(KnowledgeDoc.id.desc()).limit(200).all()
+def list_documents(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    docs = (
+        db.query(KnowledgeDoc)
+        .filter(KnowledgeDoc.user_id == user.id)
+        .order_by(KnowledgeDoc.id.desc())
+        .limit(200)
+        .all()
+    )
     return [_serialize(d) for d in docs]
 
 
 @router.get("/documents/{doc_id}/content")
-def get_document_content(doc_id: int, db: Session = Depends(get_db)):
-    """文档全文（里程碑 7 引用溯源）：向量块按序拼接还原原文，供前端弹层高亮。"""
-    doc = db.get(KnowledgeDoc, doc_id)
+def get_document_content(doc_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """文档全文（引用溯源）：向量块按序拼接还原原文，供前端弹层高亮。"""
+    doc = (
+        db.query(KnowledgeDoc)
+        .filter(KnowledgeDoc.id == doc_id, KnowledgeDoc.user_id == user.id)
+        .first()
+    )
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
     return {
@@ -79,17 +91,33 @@ def get_document_content(doc_id: int, db: Session = Depends(get_db)):
 def search_knowledge(
     q: str = Query(..., min_length=1, max_length=100),
     k: int = Query(3, ge=1, le=5),
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """检索试验台（只读）：输入问题实时返回 Top-K 命中片段与相似度，演示 RAG 检索效果。"""
+    """检索试验台（只读）：输入问题实时返回 Top-K 命中片段与相似度。
+
+    检索范围限定当前用户自己的文档（doc_ids 传 None 表示无文档）。
+    """
     qs = q.strip()
-    hits = kb.search(qs, k=k) if qs else []
+    if not qs:
+        return {"query": qs, "items": []}
+    own_ids = [
+        r[0] for r in db.query(KnowledgeDoc.id).filter_by(user_id=user.id).all()
+    ]
+    if not own_ids:  # 本人无任何文档：向量库命中也可能来自他人文档，直接短路
+        return {"query": qs, "items": []}
+    hits = kb.search(qs, k=k, doc_ids=own_ids)
     return {"query": qs, "items": hits}
 
 
 @router.get("/documents/{doc_id}/chunks")
-def get_document_chunks(doc_id: int, db: Session = Depends(get_db)):
+def get_document_chunks(doc_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
     """分块可视化：取回该文档全部分块（按块序），展示解析->分块->向量化产物。"""
-    doc = db.get(KnowledgeDoc, doc_id)
+    doc = (
+        db.query(KnowledgeDoc)
+        .filter(KnowledgeDoc.id == doc_id, KnowledgeDoc.user_id == user.id)
+        .first()
+    )
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
     return {
@@ -101,8 +129,12 @@ def get_document_chunks(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/documents/{doc_id}")
-def delete_document(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.get(KnowledgeDoc, doc_id)
+def delete_document(doc_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    doc = (
+        db.query(KnowledgeDoc)
+        .filter(KnowledgeDoc.id == doc_id, KnowledgeDoc.user_id == user.id)
+        .first()
+    )
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
     kb.delete_document(doc_id)  # 同步清掉 ChromaDB 里的向量

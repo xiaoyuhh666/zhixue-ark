@@ -13,7 +13,7 @@ SSE 帧协议：
 import json
 import threading
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -23,9 +23,10 @@ from ..config import PROVIDER_LABELS, get_settings
 from ..db import SessionLocal
 from ..graph.agents import AGENTS
 from ..graph.build import build_graph
-from ..models import Conversation, Message
+from ..models import Conversation, KnowledgeDoc, Message, User
 from ..services import runtime_settings
 from ..services.profile import build_context, extract_and_store
+from .auth import get_current_user
 
 router = APIRouter()
 
@@ -58,16 +59,17 @@ def _chunk_text(content) -> str:
     return str(content or "")
 
 
-def resolve_provider(provider: str) -> tuple[str, str, int | None]:
+def resolve_provider(provider: str, user_id: int = 0) -> tuple[str, str, int | None]:
     """BYOK 优先 + 平台配额：用户自配 Key 不限量；平台 .env Key 受每日配额约束。
 
     返回 (provider, notice, quota_left)；quota_left 为平台配额剩余（None = 不限量），
     notice 非空时由调用方推 status 帧，额度用尽返回 ("", 错误文案, None)。
-    数据层暂单用户，配额按供应商分桶、全局共享。
+    用户自配 Key 按账号隔离（u{id}: 前缀）；平台 Key 配额按供应商分桶、全局共享。
     """
     settings = get_settings()
+    user_key = runtime_settings.user_scope(user_id, f"{provider}_api_key")
     # 1. 用户自配 Key（运行时）：BYOK 直用，不限量
-    if runtime_settings.get_setting(f"{provider}_api_key"):
+    if runtime_settings.get_setting(user_key):
         return provider, "", None
     # 2. 平台 Key（.env）：付费供应商受每日配额约束，免费供应商不限
     if settings.provider_config(provider)[0]:
@@ -82,7 +84,7 @@ def resolve_provider(provider: str) -> tuple[str, str, int | None]:
     fallback = settings.FALLBACK_PROVIDER.lower()
     if provider == fallback:
         return provider, "", None  # 兜底自身未接入时走原有报错流程
-    fb_provider, _, fb_left = resolve_provider(fallback)
+    fb_provider, _, fb_left = resolve_provider(fallback, user_id)
     if not fb_provider:
         return "", (
             "免费兜底模型不可用，请到「个人中心 → 模型管理」配置 API Key 后使用"
@@ -94,14 +96,17 @@ def resolve_provider(provider: str) -> tuple[str, str, int | None]:
 
 
 @router.post("/api/chat")
-def chat(req: ChatRequest):
-    """流式对话：调度智能体识别意图 -> 领域智能体生成回复，全程 SSE 推送。"""
+def chat(req: ChatRequest, user: User = Depends(get_current_user)):
+    """流式对话：调度智能体识别意图 -> 领域智能体生成回复，全程 SSE 推送。
+
+    数据按账号隔离：会话归属校验、kb 检索范围收窄到本人文档、BYOK 按用户解钥。
+    """
     settings = get_settings()
     provider = (req.provider or settings.LLM_PROVIDER).lower()
     if provider not in PROVIDER_LABELS:  # 供应商已下线或非法：回落默认，防库中残留旧值
         provider = settings.LLM_PROVIDER.lower()
     # BYOK 优先 + 平台配额：自配 Key 不限量，平台 Key 日限 20 次
-    provider, notice, quota_left = resolve_provider(provider)
+    provider, notice, quota_left = resolve_provider(provider, user.id)
     provider_label = PROVIDER_LABELS.get(provider, provider)
 
     def event_stream():
@@ -110,8 +115,9 @@ def chat(req: ChatRequest):
             return
         db: Session = SessionLocal()
         try:
-            # 0. 未配置密钥：直接报错提示（运行时 Key 优先于 .env）
-            api_key = runtime_settings.get_setting(f"{provider}_api_key") or settings.provider_config(provider)[0]
+            # 0. 未配置密钥：直接报错提示（运行时 Key 优先于 .env，用户级键隔离）
+            user_key = runtime_settings.user_scope(user.id, f"{provider}_api_key")
+            api_key = runtime_settings.get_setting(user_key) or settings.provider_config(provider)[0]
             if not api_key:
                 yield _sse({"type": "error", "message": f"{provider_label} 未配置 API 密钥，请到「个人中心 → 模型」配置后使用"})
                 return
@@ -122,17 +128,31 @@ def chat(req: ChatRequest):
                     "type": "status", "stage": "quota",
                     "message": f"本次使用平台体验额度 · {provider_label} 今日剩余 {quota_left}/{runtime_settings.PLATFORM_DAILY_LIMIT} 次",
                 })
-            # 1. 定位或创建会话
+            # 1. 定位或创建会话（归属当前用户；他人会话一律按不存在处理）
             if req.conversation_id:
-                conv = db.get(Conversation, req.conversation_id)
+                conv = (
+                    db.query(Conversation)
+                    .filter(Conversation.id == req.conversation_id, Conversation.user_id == user.id)
+                    .first()
+                )
                 if conv is None:
                     yield _sse({"type": "error", "message": "会话不存在"})
                     return
             else:
-                conv = Conversation(user_id=1, title=req.message[:20] or "新对话")
+                conv = Conversation(user_id=user.id, title=req.message[:20] or "新对话")
                 db.add(conv)
                 db.commit()
                 db.refresh(conv)
+
+            # 1.5 kb 检索范围收窄到本人文档：null/[] 检索本人全部资料，
+            #     勾选子集时与本人文档求交集，防越权检索他人文档
+            user_doc_ids = [
+                r[0] for r in db.query(KnowledgeDoc.id).filter_by(user_id=user.id).all()
+            ]
+            if req.kb_doc_ids:
+                kb_scope = [i for i in req.kb_doc_ids if i in user_doc_ids]
+            else:
+                kb_scope = user_doc_ids  # 空 = 本人无文档，工具检索自然返回空
 
             # 2. 保存用户消息
             db.add(Message(conversation_id=conv.id, role="user", content=req.message))
@@ -177,7 +197,7 @@ def chat(req: ChatRequest):
                 cur_agent_idx = 0  # 当前正在执行的智能体段下标（agent_start 推进）
                 for mode, payload in build_graph().stream(
                     {"messages": lc_msgs, "context": ctx, "use_kb": req.use_kb,
-                     "kb_doc_ids": req.kb_doc_ids, "provider": provider},
+                     "kb_doc_ids": kb_scope, "provider": provider},
                     stream_mode=["messages", "updates", "custom"],
                     config={"recursion_limit": 50},
                 ):

@@ -1,4 +1,4 @@
-"""平台设置接口（设置模块）：API Key 运行时配置 / 连通测试 / 默认模型 / 数据导出 / 清空演示数据。"""
+"""平台设置接口：API Key 运行时配置（按用户隔离）/ 连通测试 / 数据导出 / 清空本人数据。"""
 import time
 from datetime import datetime
 
@@ -11,6 +11,7 @@ from ..config import MODEL_CATALOG, PROVIDER_LABELS, get_settings
 from ..db import get_db
 from ..models import Conversation, Memory, Message, Plan
 from ..services import runtime_settings
+from .auth import get_current_user
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -27,13 +28,18 @@ class SettingsUpdate(BaseModel):
     default_provider: str | None = None
 
 
+def _uk(user, key: str) -> str:
+    """用户级设置键：BYOK 与默认模型按账号隔离（u{id}: 前缀），互不可见/互不借用。"""
+    return runtime_settings.user_scope(user.id, key)
+
+
 @router.get("")
-def get_settings_view():
+def get_settings_view(user=Depends(get_current_user)):
     """掩码回显：不回传明文 Key，只给「已配置 sk-***xxxx」与各供应商接入状态。"""
     s = get_settings()
     providers = []
     for p, key_name in _PROVIDER_KEYS.items():
-        runtime_key = runtime_settings.get_setting(key_name)
+        runtime_key = runtime_settings.get_setting(_uk(user, key_name))
         env_key, _, _ = s.provider_config(p)
         effective = runtime_key or env_key
         providers.append({
@@ -46,21 +52,21 @@ def get_settings_view():
         })
     return {
         "providers": providers,
-        "default_provider": runtime_settings.get_setting("default_provider") or s.LLM_PROVIDER,
+        "default_provider": runtime_settings.get_setting(_uk(user, "default_provider")) or s.LLM_PROVIDER,
     }
 
 
 @router.put("")
-def update_settings(body: SettingsUpdate):
+def update_settings(body: SettingsUpdate, user=Depends(get_current_user)):
     items = {}
     if body.deepseek_api_key is not None:
-        items["deepseek_api_key"] = body.deepseek_api_key
+        items[_uk(user, "deepseek_api_key")] = body.deepseek_api_key
     if body.qwen_api_key is not None:
-        items["qwen_api_key"] = body.qwen_api_key
+        items[_uk(user, "qwen_api_key")] = body.qwen_api_key
     if body.glm_api_key is not None:
-        items["glm_api_key"] = body.glm_api_key
+        items[_uk(user, "glm_api_key")] = body.glm_api_key
     if body.default_provider is not None:
-        items["default_provider"] = body.default_provider
+        items[_uk(user, "default_provider")] = body.default_provider
     runtime_settings.set_settings(items)
     return {"ok": True}
 
@@ -70,12 +76,12 @@ class TestRequest(BaseModel):
 
 
 @router.get("/models")
-def model_square():
-    """模型广场：MODEL_CATALOG 目录元数据 + 各家实时接入状态（运行时 Key 优先）。"""
+def model_square(user=Depends(get_current_user)):
+    """模型广场：MODEL_CATALOG 目录元数据 + 各家实时接入状态（本人运行时 Key 优先）。"""
     s = get_settings()
     items = []
     for p, meta in MODEL_CATALOG.items():
-        runtime_key = runtime_settings.get_setting(_PROVIDER_KEYS[p])
+        runtime_key = runtime_settings.get_setting(_uk(user, _PROVIDER_KEYS[p]))
         env_key = s.provider_config(p)[0]
         effective = runtime_key or env_key
         items.append({
@@ -90,17 +96,17 @@ def model_square():
         })
     return {
         "models": items,
-        "default_provider": runtime_settings.get_setting("default_provider") or s.LLM_PROVIDER,
+        "default_provider": runtime_settings.get_setting(_uk(user, "default_provider")) or s.LLM_PROVIDER,
         "configured_count": sum(1 for m in items if m["configured"]),
     }
 
 
 @router.post("/test")
-def test_provider(body: TestRequest):
+def test_provider(body: TestRequest, user=Depends(get_current_user)):
     """连通性测试：用当前生效的 Key 发一个最小请求，验证 Key 真实可用（答辩防翻车）。"""
     p = body.provider if body.provider in _PROVIDER_KEYS else "deepseek"
     s = get_settings()
-    api_key = runtime_settings.get_setting(_PROVIDER_KEYS[p]) or s.provider_config(p)[0]
+    api_key = runtime_settings.get_setting(_uk(user, _PROVIDER_KEYS[p])) or s.provider_config(p)[0]
     if not api_key:
         return {"ok": False, "error": "未配置 API Key"}
     _, base_url, model = s.provider_config(p)
@@ -128,23 +134,25 @@ def test_provider(body: TestRequest):
 
 
 @router.get("/export")
-def export_data(db: Session = Depends(get_db)):
-    """全量数据导出（JSON）：画像在 users，会话消息/记忆/计划一次带走。"""
-    from ..models import User
-
-    user = db.get(User, 1)
-    convs = db.query(Conversation).order_by(Conversation.id).all()
+def export_data(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """本人全量数据导出（JSON）：画像在 users 行，会话消息/记忆/计划按账号带走。"""
+    convs = (
+        db.query(Conversation)
+        .filter(Conversation.user_id == user.id)
+        .order_by(Conversation.id)
+        .all()
+    )
     data = {
         "exported_at": datetime.now().isoformat(),
         "profile": {
-            "nickname": user.nickname if user else "",
-            "school": user.school if user else "",
-            "major": user.major if user else "",
-            "grade": user.grade if user else "",
-            "preferences": user.preferences if user else [],
-            "weekly_hours": user.weekly_hours if user else 0,
-            "interests": user.interests if user else [],
-            "goals": user.goals if user else [],
+            "nickname": user.nickname or "",
+            "school": user.school or "",
+            "major": user.major or "",
+            "grade": user.grade or "",
+            "preferences": user.preferences or [],
+            "weekly_hours": user.weekly_hours or 0,
+            "interests": user.interests or [],
+            "goals": user.goals or [],
         },
         "conversations": [
             {
@@ -159,22 +167,27 @@ def export_data(db: Session = Depends(get_db)):
         ],
         "memories": [
             {"content": m.content, "tag": m.tag, "created_at": m.created_at.isoformat() if m.created_at else None}
-            for m in db.query(Memory).order_by(Memory.id).all()
+            for m in db.query(Memory).filter_by(user_id=user.id).order_by(Memory.id).all()
         ],
         "plans": [
             {"title": p.title, "deadline": p.deadline, "items": p.items or []}
-            for p in db.query(Plan).order_by(Plan.id).all()
+            for p in db.query(Plan).filter_by(user_id=user.id).order_by(Plan.id).all()
         ],
     }
     return data
 
 
 @router.delete("/demo-data")
-def clear_demo_data(db: Session = Depends(get_db)):
-    """清空对话/消息/记忆/计划（画像与知识库保留）；用于重置演示环境。"""
-    n_msgs = db.query(Message).delete()
-    n_convs = db.query(Conversation).delete()
-    n_mems = db.query(Memory).delete()
-    n_plans = db.query(Plan).delete()
+def clear_demo_data(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """清空本人的对话/消息/记忆/计划（画像与知识库保留）；用于重置个人演示环境。"""
+    own_conv_ids = [
+        c.id for c in db.query(Conversation.id).filter_by(user_id=user.id).all()
+    ]
+    n_msgs = 0
+    if own_conv_ids:
+        n_msgs = db.query(Message).filter(Message.conversation_id.in_(own_conv_ids)).delete(synchronize_session=False)
+    n_convs = db.query(Conversation).filter(Conversation.user_id == user.id).delete(synchronize_session=False)
+    n_mems = db.query(Memory).filter(Memory.user_id == user.id).delete(synchronize_session=False)
+    n_plans = db.query(Plan).filter(Plan.user_id == user.id).delete(synchronize_session=False)
     db.commit()
     return {"ok": True, "cleared": {"messages": n_msgs, "conversations": n_convs, "memories": n_mems, "plans": n_plans}}
