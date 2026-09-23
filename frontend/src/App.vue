@@ -12,7 +12,7 @@ import InsightsView from './components/InsightsView.vue'
 import ModelSquare from './components/ModelSquare.vue'
 import AccountView from './components/AccountView.vue'
 import AuthModal from './components/AuthModal.vue'
-import { getConversations, getConversation, deleteConversation, streamChat, createPlan, getKbDocuments, getMemories } from './api'
+import { getConversations, getConversation, deleteConversation, streamChat, createPlan, getKbDocuments, getMemories, onUnauthorized } from './api'
 
 /* 视图元信息：顶栏标题 / 徽标 / 占位页页头
    2026-09-20 二次改版：「对话」与「智能体」合并为「智能对话」——
@@ -76,6 +76,17 @@ let abortCtl = null
    token + 用户存 localStorage（ark_user），刷新保持登录态 */
 const user = ref(JSON.parse(localStorage.getItem('ark_user') || 'null'))
 const showAuth = ref(false)
+
+/* 401 全局响应式处理（防刷屏改版 2026-09-23）：
+   api 层确认「带 token 却被拒」（token 过期/失效）时回调到这里——
+   清账号态、回落地页并弹登录框，全程无整页刷新，杜绝 401→reload 死循环 */
+onUnauthorized(() => {
+  user.value = null
+  entered.value = false
+  showAuth.value = true
+  ElMessage.warning('登录已过期，请重新登录')
+  history.replaceState(null, '', window.location.pathname + window.location.search)
+})
 
 /* 落地页门禁：hash 路由管理（#/app=主界面，无 hash=落地页），
    浏览器后退/前进可正常在两者间切换，刷新也保持状态；
@@ -154,6 +165,7 @@ function authSuccess(u) {
   user.value = u
   localStorage.setItem('ark_user', JSON.stringify(u))
   showAuth.value = false
+  loadUserData()  // 登录后补拉会话/知识库/记忆（未登录期间不预取）
   enterApp()
 }
 /* 退出登录：清账号态并回落地页 */
@@ -229,12 +241,13 @@ async function loadConversations(retried = false) {
     const list = await getConversations()
     conversations.value = Array.isArray(list) ? list : []
   } catch (e) {
-    /* 首次失败静默重试一次：后端冷启动/服务切换窗口的瞬时失败不打扰用户 */
-    if (!retried) {
+    /* 首次失败静默重试一次：后端冷启动/服务切换窗口的瞬时失败不打扰用户；
+       认证类 401 不重试不报错（登录框已弹出，重试只会重复打扰） */
+    if (!retried && !e?.auth) {
       setTimeout(() => loadConversations(true), 1200)
       return
     }
-    ElMessage.error(e?.message || '加载历史会话失败')
+    if (!e?.auth) ElMessage.error(e?.message || '加载历史会话失败')
   }
 }
 
@@ -495,11 +508,18 @@ async function makePlan(msg) {
   }
 }
 
-onMounted(() => {
-  window.addEventListener('hashchange', onHashChange)
+/* 登录后才拉取的基础数据：会话列表 / 知识库文档 / 记忆条数。
+   未登录一律不发——曾因 onMounted 无条件请求导致「401→reload→401」刷屏死循环 */
+function loadUserData() {
+  if (!user.value) return
   loadConversations()
   getKbDocuments().then(d => { kbDocs.value = d || [] }).catch(() => {})
   getMemories().then(m => { memCount.value = (m || []).length }).catch(() => {})
+}
+
+onMounted(() => {
+  window.addEventListener('hashchange', onHashChange)
+  loadUserData()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('hashchange', onHashChange)

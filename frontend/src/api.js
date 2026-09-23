@@ -6,7 +6,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || ''
 
 async function request(url, options = {}) {
   const res = await fetch(API_BASE + url, withAuth(options))
-  if (res.status === 401) return handle401() // 登录过期：清态回落地页重登
+  if (res.status === 401) return handle401() // 带 token 被拒→响应式弹登录框；无 token→静默
   if (!res.ok) {
     // 优先透出后端 HTTPException 的 detail（如「用户名或密码错误」）
     let msg = `请求失败（HTTP ${res.status}）`
@@ -36,11 +36,48 @@ function withAuth(options = {}) {
   return { ...options, headers: { ...(options.headers || {}), ...authHeaders() } }
 }
 
-/* 401 统一处理：清掉失效登录态并回到落地页，用户重新登录 */
-function handle401() {
-  localStorage.removeItem('ark_user')
+/* 401 统一处理（防刷屏改版 2026-09-23）：
+   - 请求根本没带 token（未登录误发）：静默丢弃，不当成「登录过期」，不清态不刷新
+   - 确实带了 token 却被拒（过期/失效）：清登录态，通过 onUnauthorized 回调通知 UI
+     响应式弹登录框——不再 location.reload()，从根上杜绝 401→刷新→401 死循环
+   - 兜底：回调未注册时走 safeReload()，仍带卫兵不会连刷 */
+let onUnauthorizedCb = null
+export function onUnauthorized(cb) { onUnauthorizedCb = cb }
+
+/* sessionStorage reload 卫兵：10 秒窗口内最多放行 2 次刷新，超出直接熔断。
+   未来任何代码路径若再引发「401→刷新」类循环，在这里被拦停而非把页面刷爆 */
+const RELOAD_GUARD_KEY = 'ark_reload_guard'
+function safeReload() {
+  try {
+    const now = Date.now()
+    const stamps = JSON.parse(sessionStorage.getItem(RELOAD_GUARD_KEY) || '[]')
+      .filter(t => now - t < 10000)
+    stamps.push(now)
+    sessionStorage.setItem(RELOAD_GUARD_KEY, JSON.stringify(stamps))
+    if (stamps.length > 2) {
+      console.warn('[ark] 10 秒内连续刷新超限，已熔断本次 reload 防止刷屏')
+      return
+    }
+  } catch { /* sessionStorage 不可用（隐私模式等）：按普通刷新放行 */ }
   location.reload()
-  throw new Error('登录已过期，请重新登录')
+}
+
+function handle401() {
+  if (!authHeaders().Authorization) {
+    // 未登录误发的请求：静默处理，仅抛错由调用方 catch，不触发登出/刷新
+    const silent = new Error('未登录')
+    silent.auth = true
+    throw silent
+  }
+  localStorage.removeItem('ark_user')
+  if (onUnauthorizedCb) {
+    onUnauthorizedCb()  // App 层响应式弹登录框，无整页刷新
+  } else {
+    safeReload()  // 回调未注册（App 外单独使用 api 模块）时的兜底路径
+  }
+  const expired = new Error('登录已过期，请重新登录')
+  expired.auth = true  // 标记认证类错误：调用方跳过重试与重复报错
+  throw expired
 }
 
 /* ---- 账号认证（登录 / 注册）---- */
@@ -260,7 +297,7 @@ export async function streamChat(payload, onEvent, signal) {
     body: JSON.stringify(payload),
     signal
   })
-  if (res.status === 401) return handle401() // 登录过期：清态回落地页重登
+  if (res.status === 401) return handle401() // 带 token 被拒→响应式弹登录框；无 token→静默
   if (!res.ok) throw new Error(`请求失败（HTTP ${res.status}）`)
   if (!res.body) throw new Error('当前浏览器不支持流式响应')
 
