@@ -169,11 +169,15 @@ def chat(req: ChatRequest, user: User = Depends(get_current_user)):
                 HumanMessage(content=m.content) if m.role == "user" else AIMessage(content=m.content)
                 for m in history[-MAX_HISTORY:]
             ]
-            # 里程碑 7：上一轮是澄清追问 -> 提示调度直接出计划，防止连环追问
+            # 里程碑 7：上一轮是澄清追问 -> 提示调度结合用户最新消息判断，
+            # 真补充了直接出计划；没补充（如只回了「你好」）不许原样重复追问
             prev_ai = next((m for m in reversed(history) if m.role == "assistant"), None)
             if prev_ai and prev_ai.plan and prev_ai.plan.get("action") == "clarify":
                 lc_msgs.append(SystemMessage(
-                    content="上一轮已向用户澄清追问，用户本轮已补充信息，请直接产出任务执行计划，不要再次追问。"
+                    content="上一轮你已向用户澄清追问。请判断用户最新消息是否真正回答了追问或给出实质信息："
+                    "是 -> 直接产出任务执行计划，不要再追问；"
+                    "否（如仅问候「你好」或无意义内容）-> 禁止原样重复追问，"
+                    "把最新消息当问候/闲聊处理：action=plan 且 agent=general，友好回应即可。"
                 ))
 
             yield _sse({

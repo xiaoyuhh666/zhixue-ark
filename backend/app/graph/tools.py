@@ -1,6 +1,6 @@
 """智能体工具箱（里程碑 6）：定向知识库检索 + Python 计算器。
 
-- kb_search：按分类定向检索知识库（ChromaDB where 过滤），供智能体通过
+- kb_search：按分类定向检索知识库（kb_chunks 表 SQL 过滤），供智能体通过
   function calling 自主决定何时检索，取代旧版「全局前置注入」。
 - python_calc：ast 白名单求值器，零第三方依赖，只允许数字四则运算与
   少量安全函数，杜绝任意代码执行。

@@ -137,7 +137,7 @@ def delete_document(doc_id: int, user=Depends(get_current_user), db: Session = D
     )
     if doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
-    kb.delete_document(doc_id)  # 同步清掉 ChromaDB 里的向量
+    kb.delete_document(doc_id)  # 同步清掉向量块表里的向量
     db.delete(doc)
     db.commit()
     return {"ok": True}

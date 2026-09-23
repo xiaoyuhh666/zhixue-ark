@@ -118,7 +118,7 @@ class PlatformSetting(Base):
 
 
 class KnowledgeDoc(Base):
-    """知识库文档（里程碑 4）：原文入库，向量存 ChromaDB。"""
+    """知识库文档（里程碑 4）：元数据入库，向量块存 kb_chunks 表（本地 SQLite / Turso）。"""
 
     __tablename__ = "knowledge_docs"
 
@@ -127,7 +127,7 @@ class KnowledgeDoc(Base):
     filename: Mapped[str] = mapped_column(String(256))  # 原始文件名
     ext: Mapped[str] = mapped_column(String(16), default="")  # md/txt/pdf/docx/pptx
     # 里程碑 6：文档分类（study/competition/research/career/life/general），
-    # 智能体可按分类定向检索（ChromaDB where 过滤）
+    # 智能体可按分类定向检索（kb_chunks 表 SQL 过滤）
     category: Mapped[str] = mapped_column(String(32), default="general")
     status: Mapped[str] = mapped_column(String(16), default="ready")  # ready | failed
     chunk_count: Mapped[int] = mapped_column(default=0)  # 切块数量

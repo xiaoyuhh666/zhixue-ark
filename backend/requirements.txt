@@ -8,8 +8,10 @@ pydantic-settings>=2.3
 openai>=1.40
 langchain-openai>=0.3
 langgraph>=0.2
-# 知识库 RAG（里程碑 4）：解析/分块/Chroma 检索；嵌入走智谱 embedding-3 API，无需 torch/sentence-transformers
-chromadb>=0.5
+# 知识库 RAG（里程碑 4）：解析/分块；嵌入走智谱 embedding-3 API，无需 torch/sentence-transformers
+# 向量存储 2026-09-23 起用 Turso/SQLite 表（libSQL 向量函数），ChromaDB 退役
 pypdf>=4.0
 python-docx>=1.1
 python-pptx>=0.6
+# Turso 云数据库（libSQL）SQLAlchemy 方言：配置 TURSO_DATABASE_URL 时启用，未配置回落本地 SQLite
+sqlalchemy-libsql>=0.1.0

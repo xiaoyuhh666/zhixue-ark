@@ -12,6 +12,9 @@ venv/
 # ---- 运行时数据（SQLite 数据库 + ChromaDB 向量库）----
 backend/data/
 
+# ---- 本地截图资料（不入库）----
+截图/
+
 # ---- 前端构建产物与依赖 ----
 node_modules/
 frontend/dist/

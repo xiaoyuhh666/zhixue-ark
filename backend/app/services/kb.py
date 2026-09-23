@@ -1,14 +1,22 @@
-"""知识库服务（里程碑 4）：文档解析 -> 分块 -> API 嵌入 -> ChromaDB 检索。
+"""知识库服务（里程碑 4）：文档解析 -> 分块 -> API 嵌入 -> 向量表检索。
 
 设计要点：
 - 嵌入走智谱 embedding-3（OpenAI 兼容 /embeddings，复用 GLM_API_KEY），不再本地加载模型
   —— 免去 torch/sentence-transformers 依赖与 ~2GB 内存，Render 免费层 512MB 稳定运行
 - 分批请求（智谱单请求上限 64 条）+ L2 归一化，返回顺序与输入一致
-- ChromaDB 持久化在 backend/data/chroma，collection 按余弦距离建索引，
-  名称带嵌入模型标识：换嵌入模型即换集合，新旧维度自动隔离不冲突
-- 引用溯源：每个向量块带 doc_id 元数据，检索命中即可回溯到文档名与原文片段
+- 向量存储 2026-09-23 起用数据库表 kb_chunks（ChromaDB 退役）：
+  · 配置 Turso 时走远端 libSQL，embedding 列为 F32_BLOB 向量类型，
+    检索用服务端 vector_distance_cos 计算，数据重启不丢
+  · 未配置 Turso 时同一张表落在本地 SQLite（F32_BLOB 退化为普通 BLOB），
+    相似度在 Python 侧用点积计算（向量已归一化，点积即余弦），本地开发零依赖
+- 引用溯源：每个向量块带 doc_id/seq，检索命中即可回溯文档名与原文片段，按 seq 还原全文
 """
+import json
+
+from sqlalchemy import text
+
 from ..config import get_settings
+from ..db import IS_LOCAL_SQLITE, engine
 from ..models import KnowledgeDoc
 
 # 解析后拼接段落时的分隔符
@@ -16,6 +24,9 @@ _PARA_SEP = "\n"
 
 # 惰性单例的嵌入客户端（进程内复用 HTTP 连接池，避免并发重复创建）
 _client = None
+
+# kb_chunks 表是否已确认存在（进程内建一次即可）
+_TABLE_READY = False
 
 
 def _get_client():
@@ -31,19 +42,63 @@ def _get_client():
     return _client
 
 
-def _get_collection():
-    """获取 ChromaDB 集合（余弦距离，持久化）；名称带嵌入模型标识。"""
-    import re
+# ---------- 向量块表（ChromaDB 替代） ----------
 
-    import chromadb
+def _ensure_table() -> None:
+    """幂等建 kb_chunks 向量块表（进程内确认一次）。
 
-    s = get_settings()
-    safe = re.sub(r"[^A-Za-z0-9_-]", "-", s.KB_EMBED_MODEL).strip("-") or "default"
-    client = chromadb.PersistentClient(path=s.CHROMA_DIR)
-    return client.get_or_create_collection(
-        name=f"zhixue_kb_{safe}",
-        metadata={"hnsw:space": "cosine"},
-    )
+    embedding 列声明为 libSQL 向量类型 F32_BLOB：远端 Turso 上是真正的向量列，
+    本地 SQLite 按亲和性规则退化为普通 BLOB，同一套 SQL 两种库通用。
+    """
+    global _TABLE_READY
+    if _TABLE_READY:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS kb_chunks (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id    INTEGER NOT NULL,
+                seq       INTEGER NOT NULL,
+                filename  TEXT    NOT NULL DEFAULT '',
+                category  TEXT    NOT NULL DEFAULT 'general',
+                content   TEXT    NOT NULL,
+                embedding F32_BLOB NOT NULL
+            )
+            """
+        ))
+    _TABLE_READY = True
+
+
+def _pack_vec(vec: list[float]) -> bytes:
+    """float32 小端打包（libSQL F32_BLOB 的存储格式，本地 SQLite 同格式兼容）。"""
+    import struct
+
+    return struct.pack(f"<{len(vec)}f", *vec)
+
+
+def _unpack_vec(blob) -> list[float]:
+    """把 float32 BLOB 解包回 Python 列表（仅本地 SQLite 检索路径使用）。"""
+    import struct
+
+    blob = bytes(blob)
+    n = len(blob) // 4
+    return list(struct.unpack(f"<{n}f", blob))
+
+
+def _doc_filter_sql(category: str | None, doc_ids: list[int] | None) -> tuple[str, dict]:
+    """构造过滤条件与绑定参数（分类 + 文档范围），两种库共用。"""
+    conds, params = ["1=1"], {}
+    if category:
+        conds.append("category = :category")
+        params["category"] = category
+    if doc_ids:  # 文档范围过滤：用户在对话页知识库菜单勾选的资料
+        keys = []
+        for i, d in enumerate(doc_ids):
+            params[f"d{i}"] = int(d)
+            keys.append(f":d{i}")
+        conds.append(f"doc_id IN ({', '.join(keys)})")
+    return " AND ".join(conds), params
 
 
 # ---------- 文档解析 ----------
@@ -192,71 +247,65 @@ def _l2_normalize(vec: list[float]) -> list[float]:
     return [x / norm for x in vec]
 
 
-def add_document(doc: KnowledgeDoc, text: str) -> int:
-    """对文档分块并向量化入库，返回块数。向量 id 带 doc_id 便于整篇删除。"""
-    chunks = split_chunks(text)
+def add_document(doc: KnowledgeDoc, raw_text: str) -> int:
+    """对文档分块并向量化入库，返回块数。每个块带 doc_id/seq，可整篇删除、按序还原。
+
+    参数名用 raw_text 而非 text，避免遮蔽 sqlalchemy.text。
+    """
+    chunks = split_chunks(raw_text)
     if not chunks:
         return 0
     vecs = embed_texts(chunks)
-    col = _get_collection()
-    col.add(
-        ids=[f"doc{doc.id}-c{i}" for i in range(len(chunks))],
-        embeddings=vecs,
-        documents=chunks,
-        # 元数据带分类（里程碑 6）：供定向检索 where 过滤
-        metadatas=[
-            {"doc_id": doc.id, "filename": doc.filename, "category": doc.category or "general"}
-        ] * len(chunks),
-    )
+    _ensure_table()
+    with engine.begin() as conn:
+        for i, (c, v) in enumerate(zip(chunks, vecs)):
+            conn.execute(
+                text(
+                    "INSERT INTO kb_chunks (doc_id, seq, filename, category, content, embedding) "
+                    "VALUES (:doc_id, :seq, :filename, :category, :content, :emb)"
+                ),
+                {
+                    "doc_id": doc.id,
+                    "seq": i,
+                    "filename": doc.filename,
+                    "category": doc.category or "general",  # 元数据带分类：供定向检索过滤
+                    "content": c,
+                    "emb": _pack_vec(v),
+                },
+            )
     return len(chunks)
 
 
 def delete_document(doc_id: int) -> None:
-    """按 doc_id 删除该文档的全部向量。"""
-    col = _get_collection()
-    col.delete(where={"doc_id": doc_id})
+    """按 doc_id 删除该文档的全部向量块。"""
+    _ensure_table()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM kb_chunks WHERE doc_id = :d"), {"d": doc_id})
 
 
 def get_document_content(doc_id: int) -> str:
-    """按 doc_id 取回全部向量块并按序拼接，还原文档全文（里程碑 7 引用溯源）。
-
-    向量 id 形如 doc{id}-c{i}，按块序号 i 排序保证原文顺序正确。
-    """
-    col = _get_collection()
-    if col.count() == 0:
-        return ""
-    res = col.get(where={"doc_id": doc_id}, include=["documents"])
-    if not res or not res.get("ids"):
-        return ""
-    items: list[tuple[int, str]] = []
-    for rid, text in zip(res["ids"], res["documents"]):
-        try:
-            items.append((int(str(rid).rsplit("-c", 1)[-1]), text))
-        except ValueError:  # 非常规 id 跳过，不影响其余块
-            continue
-    items.sort(key=lambda x: x[0])
-    return "\n".join(t for _, t in items)
+    """按 doc_id 取回全部向量块并按 seq 拼接，还原文档全文（里程碑 7 引用溯源）。"""
+    _ensure_table()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT content FROM kb_chunks WHERE doc_id = :d ORDER BY seq"),
+            {"d": doc_id},
+        ).fetchall()
+    return "\n".join(r[0] for r in rows)
 
 
 def get_chunks(doc_id: int) -> list[dict]:
     """按 doc_id 取回全部分块（按块序），供前端「分块可视化」展示。
 
-    返回 [{index, text, chars}]；与 get_document_content 同样解析 doc{id}-c{i} 向量 id。
+    返回 [{index, text, chars}]。
     """
-    col = _get_collection()
-    if col.count() == 0:
-        return []
-    res = col.get(where={"doc_id": doc_id}, include=["documents"])
-    if not res or not res.get("ids"):
-        return []
-    items: list[tuple[int, str]] = []
-    for rid, text in zip(res["ids"], res["documents"]):
-        try:
-            items.append((int(str(rid).rsplit("-c", 1)[-1]), text))
-        except ValueError:
-            continue
-    items.sort(key=lambda x: x[0])
-    return [{"index": i, "text": t, "chars": len(t)} for i, t in items]
+    _ensure_table()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT seq, content FROM kb_chunks WHERE doc_id = :d ORDER BY seq"),
+            {"d": doc_id},
+        ).fetchall()
+    return [{"index": seq, "text": t, "chars": len(t)} for seq, t in rows]
 
 
 def search(
@@ -265,41 +314,68 @@ def search(
 ) -> list[dict]:
     """语义检索：返回 [{doc_id, doc, snippet, score}]，score 为归一化余弦相似度。
 
-    category（里程碑 6）：传入分类时用 ChromaDB where 过滤，实现定向检索。
+    category（里程碑 6）：传入分类时 SQL 过滤，实现定向检索。
     doc_ids（2026-09-20）：传入文档 id 列表时只在这些文档的块中检索（用户在
     对话页知识库菜单里勾选资料）；None/空列表表示不过滤（检索全部）。
+
+    两种检索路径：
+    - 远端 libSQL（Turso）：vector_distance_cos 在服务端算距离，SQL 取 Top-K
+    - 本地 SQLite：取出候选块，Python 侧点积排序（向量已归一化，点积即余弦）
     """
     s = get_settings()
-    col = _get_collection()
-    if col.count() == 0:
+    _ensure_table()
+    k = k or s.KB_TOP_K
+    where_sql, params = _doc_filter_sql(category, doc_ids)
+
+    with engine.connect() as conn:
+        if not IS_LOCAL_SQLITE:
+            # 远端路径：嵌入后传 JSON 给 vector32，服务端计算余弦距离
+            qv = embed_texts([query])[0]
+            rows = conn.execute(
+                text(
+                    f"SELECT doc_id, filename, content, "
+                    f"vector_distance_cos(embedding, vector32(:qv)) AS dist "
+                    f"FROM kb_chunks WHERE {where_sql} ORDER BY dist ASC LIMIT {int(k)}"
+                ),
+                {**params, "qv": json.dumps(qv)},
+            ).fetchall()
+            hits = []
+            for doc_id, filename, content, dist in rows:
+                score = round(1.0 - float(dist), 4)  # 余弦距离 -> 相似度（与旧 ChromaDB 语义一致）
+                if score < s.KB_MIN_SCORE:
+                    continue
+                hits.append({
+                    "doc_id": doc_id,
+                    "doc": filename or "",
+                    "snippet": content[:200],
+                    "score": score,
+                })
+            return hits
+
+        # 本地路径：取出全部候选块，Python 点积排序
+        rows = conn.execute(
+            text(
+                f"SELECT doc_id, filename, content, embedding "
+                f"FROM kb_chunks WHERE {where_sql}"
+            ),
+            params,
+        ).fetchall()
+    if not rows:
         return []
-    k = min(k or s.KB_TOP_K, col.count())
+
     qv = embed_texts([query])[0]
-    query_kwargs = {}
-    conds = []
-    if category:
-        conds.append({"category": category})
-    if doc_ids:  # 文档范围过滤：$in 匹配用户勾选的 doc_id
-        conds.append({"doc_id": {"$in": list(doc_ids)}})
-    if len(conds) == 1:  # 单条件直接 where
-        query_kwargs["where"] = conds[0]
-    elif conds:  # 多条件必须显式 $and（ChromaDB 不接受多 key 平铺 dict）
-        query_kwargs["where"] = {"$and": conds}
-    res = col.query(
-        query_embeddings=[qv], n_results=k,
-        include=["documents", "metadatas", "distances"], **query_kwargs,
-    )
-    hits = []
-    for doc_text, meta, dist in zip(
-        res["documents"][0], res["metadatas"][0], res["distances"][0]
-    ):
-        score = round(1.0 - float(dist), 4)  # 余弦距离 -> 相似度
+    scored = []
+    for doc_id, filename, content, emb in rows:
+        try:
+            vec = _unpack_vec(emb)
+        except Exception:  # 维度不符/脏数据跳过，不影响其余块
+            continue
+        score = sum(a * b for a, b in zip(qv, vec))  # 归一化向量的点积即余弦相似度
         if score < s.KB_MIN_SCORE:
             continue
-        hits.append({
-            "doc_id": meta.get("doc_id"),
-            "doc": meta.get("filename", ""),
-            "snippet": doc_text[:200],
-            "score": score,
-        })
-    return hits
+        scored.append((score, doc_id, filename or "", content))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [
+        {"doc_id": d, "doc": f, "snippet": c[:200], "score": round(sc, 4)}
+        for sc, d, f, c in scored[:k]
+    ]

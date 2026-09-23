@@ -149,7 +149,7 @@ watch(() => props.activeId, (id) => {
         </div>
         <div class="plan-title">{{ p.title }}</div>
         <div class="plan-bar"><div class="plan-fill" :style="{ width: p.total ? (p.done_count / p.total * 100) + '%' : '0%' }"></div></div>
-        <div class="plan-meta"><span>{{ p.done_count }}/{{ p.total }} 步已完成</span><span v-if="p.deadline">截 {{ p.deadline }}</span></div>
+        <div class="plan-meta"><span>已完成 {{ p.done_count }}/{{ p.total }} 步</span><span v-if="p.deadline">截止 {{ p.deadline }}</span></div>
       </div>
       <!-- 展开区：步骤清单，点击即勾选推进（同步任务计划中心） -->
       <div v-if="expandedPlan === p.id" class="plan-steps">

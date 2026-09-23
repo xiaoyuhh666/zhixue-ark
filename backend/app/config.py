@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     PORT: int = 8000
     DATABASE_URL: str = f"sqlite:///{(BASE_DIR / 'data' / 'app.db').as_posix()}"
 
+    # ---- Turso 云数据库（可选）：配置后业务数据与知识库向量走远端 libSQL，重启不丢 ----
+    TURSO_DATABASE_URL: str = ""  # 形如 libsql://xxx.turso.io；留空回落本地 SQLite
+    TURSO_AUTH_TOKEN: str = ""
+
     # ---- LLM（OpenAI 兼容协议）----
     LLM_PROVIDER: str = "deepseek"  # deepseek | qwen | glm
     DEEPSEEK_API_KEY: str = ""
@@ -35,7 +39,6 @@ class Settings(BaseSettings):
     KB_CHUNK_OVERLAP: int = 80  # 相邻块重叠字符数
     KB_TOP_K: int = 3  # 检索返回条数
     KB_MIN_SCORE: float = 0.35  # 相似度阈值，低于此值不作为引用（归一化余弦）
-    CHROMA_DIR: str = f"{(BASE_DIR / 'data' / 'chroma').as_posix()}"
 
     model_config = {"env_file": str(BASE_DIR / ".env"), "extra": "ignore"}
 
