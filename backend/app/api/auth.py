@@ -68,6 +68,7 @@ def _user_dict(u: User) -> dict:
         "id": u.id,
         "username": u.username,
         "nickname": u.nickname or u.username,
+        "avatar": u.avatar or "",
         "major": u.major or "",
         "grade": u.grade or "",
     }
@@ -132,3 +133,21 @@ def login(body: AuthBody, db: Session = Depends(get_db)):
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
     return {"user": _user_dict(user)}
+
+
+class AvatarBody(BaseModel):
+    avatar: str  # base64 data URL（前端已压缩到 256px），空串 = 恢复默认头像
+
+
+@router.put("/avatar")
+def update_avatar(body: AvatarBody, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """上传头像：接受前端压缩后的 data URL（≤400KB），随账号存库；空串清除。"""
+    a = body.avatar.strip()
+    if a:
+        if not a.startswith("data:image/"):
+            raise HTTPException(400, "头像格式不支持，请上传图片文件")
+        if len(a) > 400 * 1024:
+            raise HTTPException(400, "头像过大，请换一张小图或裁剪后重试")
+    user.avatar = a
+    db.commit()
+    return {"ok": True, "avatar": user.avatar}

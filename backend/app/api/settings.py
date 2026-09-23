@@ -73,6 +73,7 @@ def update_settings(body: SettingsUpdate, user=Depends(get_current_user)):
 
 class TestRequest(BaseModel):
     provider: str
+    api_key: str | None = None  # 可选：直接测试输入框里的草稿 Key（不落库，粘贴后无需先保存）
 
 
 @router.get("/models")
@@ -103,10 +104,11 @@ def model_square(user=Depends(get_current_user)):
 
 @router.post("/test")
 def test_provider(body: TestRequest, user=Depends(get_current_user)):
-    """连通性测试：用当前生效的 Key 发一个最小请求，验证 Key 真实可用（答辩防翻车）。"""
+    """连通性测试：优先测 body 里传入的草稿 Key（不落库），否则用当前生效 Key 发最小请求。"""
     p = body.provider if body.provider in _PROVIDER_KEYS else "deepseek"
     s = get_settings()
-    api_key = runtime_settings.get_setting(_uk(user, _PROVIDER_KEYS[p])) or s.provider_config(p)[0]
+    draft = (body.api_key or "").strip()
+    api_key = draft or runtime_settings.get_setting(_uk(user, _PROVIDER_KEYS[p])) or s.provider_config(p)[0]
     if not api_key:
         return {"ok": False, "error": "未配置 API Key"}
     _, base_url, model = s.provider_config(p)
