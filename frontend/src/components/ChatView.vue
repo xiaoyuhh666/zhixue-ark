@@ -14,7 +14,9 @@ const props = defineProps({
   // 知识库检索试验台「去对话页追问」：预填到输入框的问题文本
   draftSeed: { type: String, default: '' },
   // 长期记忆条数（左下角记忆开关胶囊展示）
-  memCount: { type: Number, default: 0 }
+  memCount: { type: Number, default: 0 },
+  // 登录账号（用户消息头像展示自定义图片/昵称首字，替代硬编码首字）
+  user: { type: Object, default: null }
 })
 
 // provider / useKb / kbDocIds / useMemory 双向绑定（工具栏左侧知识库+记忆，右侧模型+发送）
@@ -24,6 +26,11 @@ const kbDocIds = defineModel('kbDocIds', { type: Array, default: null }) // null
 const useMemory = defineModel('useMemory', { type: Boolean, default: true })
 
 const emit = defineEmits(['send', 'new-chat', 'jump-citation', 'make-plan', 'pick-agent', 'seed-consumed', 'stop', 'regenerate', 'retry-with'])
+
+/* 用户消息头像：自定义图片 > 昵称首字 > 「我」 */
+const userInitial = computed(
+  () => (props.user?.nickname || props.user?.username || '我')[0] || '我'
+)
 
 const draft = ref('')
 const scrollEl = ref(null)
@@ -300,7 +307,8 @@ watch(
           :class="{ user: m.role === 'user' }"
         >
           <div class="msg-avatar" :class="m.role === 'user' ? 'avatar-user' : 'avatar-ai'">
-            {{ m.role === 'user' ? '明' : '智' }}
+            <img v-if="m.role === 'user' && user?.avatar" :src="user.avatar" alt="头像" />
+            <template v-else>{{ m.role === 'user' ? userInitial : '智' }}</template>
           </div>
           <div class="msg-body">
             <div class="msg-meta">
@@ -577,6 +585,7 @@ watch(
 }
 .avatar-ai { background: var(--pink-soft); color: var(--accent); }
 .avatar-user { background: var(--pink); color: #141416; border-radius: var(--r-full); }
+.msg-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block; }
 .msg-body { max-width: 80%; min-width: 0; }
 .msg-meta {
   font-family: var(--mono); font-size: 10.5px; color: var(--dim);

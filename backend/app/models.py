@@ -15,6 +15,8 @@ class User(Base):
     nickname: Mapped[str] = mapped_column(String(64), default="")
     # 账号密码（PBKDF2 哈希，salt$digest 格式；空=未设密码的演示用户）
     password_hash: Mapped[str] = mapped_column(String(128), default="")
+    # 头像（base64 data URL，随账号存库；空 = 前端用昵称首字圆标回退）
+    avatar: Mapped[str] = mapped_column(Text, default="")
     # 用户画像字段（里程碑 3：画像系统自动提炼 + 手动编辑）
     major: Mapped[str] = mapped_column(String(128), default="")
     grade: Mapped[str] = mapped_column(String(32), default="")

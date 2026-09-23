@@ -15,7 +15,7 @@ const props = defineProps({
   tab: { type: String, default: 'profile' }
 })
 
-const emit = defineEmits(['navigate', 'logout', 'tab'])
+const emit = defineEmits(['navigate', 'logout', 'tab', 'avatar-updated'])
 
 /* 当前 Tab 由 props.tab 驱动（hash 二级路径），点击时 emit('tab') 让 App 层写入历史 */
 
@@ -132,9 +132,10 @@ const modelUsage = computed(() => {
 })
 
 async function testKey(provider) {
+  const draft = keyDraft[`${provider}_api_key`].trim()
   testState.value = { ...testState.value, [provider]: { status: 'testing', text: '测试中…' } }
   try {
-    const r = await testSettingsKey(provider)
+    const r = await testSettingsKey(provider, draft || undefined)
     testState.value = {
       ...testState.value,
       [provider]: r.ok
@@ -228,7 +229,7 @@ onMounted(() => { loadStats(); loadSettings(); loadDex() })
 
       <!-- 画像 / 记忆：整页组件迁入，保留自身页头与逻辑 -->
       <template v-if="tab === 'profile' || tab === 'memory'">
-        <ProfileView v-if="tab === 'profile'" :meta="TAB_META.profile" class="tab-panel" />
+        <ProfileView v-if="tab === 'profile'" :meta="TAB_META.profile" :user="user" class="tab-panel" @avatar-updated="emit('avatar-updated', $event)" />
         <MemoryView v-else :meta="TAB_META.memory" class="tab-panel" />
       </template>
 
@@ -359,14 +360,14 @@ onMounted(() => { loadStats(); loadSettings(); loadDex() })
               v-model="keyDraft[`${p.provider}_api_key`]"
               class="key-input"
               type="password"
-              :placeholder="p.configured ? '输入新密钥可覆盖' : '粘贴 API Key 后点保存'"
+              :placeholder="p.configured ? '输入新密钥可覆盖' : '粘贴 API Key，点「测试连通」验证后保存'"
               autocomplete="off"
             />
             <button v-if="p.source === 'runtime'" class="ghost-btn small" @click="clearKey(p.provider)">清除</button>
             <button
               class="ghost-btn small"
-              :disabled="!p.configured || testState[p.provider]?.status === 'testing'"
-              :title="p.configured ? '发一个最小请求验证 Key 可用' : '先配置 Key 才能测试'"
+              :disabled="(!p.configured && !keyDraft[`${p.provider}_api_key`].trim()) || testState[p.provider]?.status === 'testing'"
+              :title="(p.configured || keyDraft[`${p.provider}_api_key`].trim()) ? '发一个最小请求验证 Key 可用' : '先粘贴 Key 再测试'"
               @click="testKey(p.provider)"
             >{{ testState[p.provider]?.status === 'testing' ? '测试中…' : '测试连通' }}</button>
             <!-- 测试结果行：必须在 v-for 作用域内（此前误置于循环外导致 p 未定义、设置面板渲染崩溃） -->

@@ -41,6 +41,7 @@ def _migrate_sqlite() -> None:
         "ALTER TABLE users ADD COLUMN preferences JSON",
         "ALTER TABLE users ADD COLUMN weekly_hours INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN password_hash VARCHAR(128) DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''",
     ]
     with engine.begin() as conn:
         cols = {row[1] for row in conn.execute(text("PRAGMA table_info(users)"))}

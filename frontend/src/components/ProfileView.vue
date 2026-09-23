@@ -5,11 +5,15 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import 'element-plus/es/components/message/style/css'
 import PageHeader from './PageHeader.vue'
-import { getProfile, updateProfile, extractProfile } from '../api'
+import { getProfile, updateProfile, extractProfile, updateAvatar } from '../api'
 
 const props = defineProps({
-  meta: { type: Object, required: true }
+  meta: { type: Object, required: true },
+  // 登录账号（头像上传：图片压缩后经 /api/auth/avatar 落库）
+  user: { type: Object, default: null }
 })
+
+const emit = defineEmits(['avatar-updated'])
 
 const form = ref({
   nickname: '', major: '', grade: '', school: '',
@@ -43,6 +47,57 @@ async function save() {
   } finally {
     saving.value = false
   }
+}
+
+/* ---- 头像上传：选图 -> canvas 压到 256px JPEG -> 落库 -> 通知上层刷新账号态 ---- */
+const avatarInput = ref(null)
+const uploadingAvatar = ref(false)
+
+function pickAvatar() {
+  avatarInput.value?.click()
+}
+
+function onAvatarChange(e) {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  if (!file) return
+  if (!file.type.startsWith('image/')) {
+    ElMessage.warning('请选择图片文件')
+    return
+  }
+  uploadingAvatar.value = true
+  compressImage(file)
+    .then(dataUrl => updateAvatar(dataUrl))
+    .then(r => {
+      ElMessage.success('头像已更新')
+      emit('avatar-updated', r.avatar)
+    })
+    .catch(err => ElMessage.error(err?.message || '头像上传失败'))
+    .finally(() => { uploadingAvatar.value = false })
+}
+
+/* 压到 256px 内的 JPEG（透明底先铺白），单张几十 KB，随账号存库无压力 */
+function compressImage(file, size = 256) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    const url = URL.createObjectURL(file)
+    img.onload = () => {
+      const scale = Math.min(1, size / Math.max(img.width, img.height))
+      const w = Math.max(1, Math.round(img.width * scale))
+      const h = Math.max(1, Math.round(img.height * scale))
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      ctx.fillStyle = '#fff'
+      ctx.fillRect(0, 0, w, h)
+      ctx.drawImage(img, 0, 0, w, h)
+      URL.revokeObjectURL(url)
+      resolve(canvas.toDataURL('image/jpeg', 0.85))
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片读取失败')) }
+    img.src = url
+  })
 }
 
 /* ---- chips 编辑（兴趣 / 目标 / 偏好共用） ---- */
@@ -124,7 +179,12 @@ onMounted(load)
       <div class="profile-grid">
         <!-- 左：个人名片卡 -->
         <aside class="card">
-          <div class="avatar">{{ (form.nickname || '同')[0] }}</div>
+          <div class="avatar" title="点击更换头像" @click="pickAvatar">
+            <img v-if="user?.avatar" :src="user.avatar" alt="头像" />
+            <template v-else>{{ (form.nickname || '同')[0] }}</template>
+            <span class="avatar-edit">{{ uploadingAvatar ? '…' : '✎' }}</span>
+          </div>
+          <input ref="avatarInput" type="file" accept="image/*" hidden @change="onAvatarChange" />
           <div class="card-name">{{ form.nickname || '未设置昵称' }}</div>
           <div class="card-sub">{{ [form.major, form.grade].filter(Boolean).join(' · ') || '专业年级待填写' }}</div>
           <div v-if="form.school" class="card-school">{{ form.school }}</div>
@@ -236,6 +296,17 @@ onMounted(load)
   border-radius: 50%; background: var(--pink-soft); border: 1.5px solid var(--pink);
   display: flex; align-items: center; justify-content: center;
   font-size: 26px; font-weight: 800; color: var(--accent);
+  cursor: pointer; position: relative; overflow: visible;
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.avatar:hover { transform: scale(1.04); box-shadow: var(--shadow); }
+.avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.avatar-edit {
+  position: absolute; right: -2px; bottom: -2px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--pink); color: #141416;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; border: 1.5px solid var(--bg);
 }
 .card-name { font-size: 17px; font-weight: 800; color: var(--text); }
 .card-sub { font-size: 12px; color: var(--muted); margin-top: 4px; }

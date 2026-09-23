@@ -76,13 +76,19 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocClick))
       <!-- 用户卡：点击展开下拉，进入个人中心 -->
       <div ref="userCard" class="user-wrap">
         <button class="user-mini" :class="{ open: userOpen }" @click="userOpen = !userOpen">
-          <div class="user-avatar">{{ displayName[0] }}</div>
+          <div class="user-avatar">
+            <img v-if="user?.avatar" :src="user.avatar" alt="头像" />
+            <template v-else>{{ displayName[0] }}</template>
+          </div>
           <span class="user-name">{{ displayName }}</span>
           <svg class="chev" :class="{ up: userOpen }" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
         </button>
         <div v-if="userOpen" class="user-drop">
           <div class="ud-head">
-            <div class="ud-avatar">{{ displayName[0] }}</div>
+            <div class="ud-avatar">
+              <img v-if="user?.avatar" :src="user.avatar" alt="头像" />
+              <template v-else>{{ displayName[0] }}</template>
+            </div>
             <div class="ud-info">
               <div class="ud-name">{{ displayName }}</div>
               <div class="ud-sub">{{ [profile.major, profile.grade].filter(Boolean).join(' · ') || '画像待完善' }}</div>
@@ -162,6 +168,10 @@ button.brand:active { transform: translateY(0); opacity: .95; }
   background: var(--pink-soft); color: var(--accent);
   display: flex; align-items: center; justify-content: center;
   border-radius: var(--r-full); font-weight: 700; font-size: 13px;
+  overflow: hidden;
+}
+.user-avatar img, .ud-avatar img {
+  width: 100%; height: 100%; object-fit: cover; border-radius: var(--r-full); display: block;
 }
 .user-name { font-size: 12.5px; font-weight: 700; color: var(--text); white-space: nowrap; }
 .chev { color: var(--dim); transition: transform .2s; }
@@ -179,6 +189,7 @@ button.brand:active { transform: translateY(0); opacity: .95; }
   display: flex; align-items: center; justify-content: center;
   border-radius: var(--r-full); font-weight: 800; font-size: 16px;
   border: 1.5px solid var(--pink);
+  overflow: hidden;
 }
 .ud-name { font-size: 14px; font-weight: 800; color: var(--text); }
 .ud-sub { font-size: 11px; color: var(--dim); margin-top: 3px; }

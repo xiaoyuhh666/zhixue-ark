@@ -105,6 +105,15 @@ export function getMe() {
   }).then(d => d.user)
 }
 
+/* 头像上传/清除：avatar 为前端压缩后的 data URL，空串恢复默认首字圆标 */
+export function updateAvatar(avatar) {
+  return request('/api/auth/avatar', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ avatar })
+  })
+}
+
 export function getConversations() {
   return request('/api/conversations')
 }
@@ -270,11 +279,12 @@ export function updateSettings(data) {
 }
 
 // 连通性测试：用当前生效 Key 发最小请求，验证 Key 真实可用
-export function testSettingsKey(provider) {
+export function testSettingsKey(provider, apiKey) {
+  // apiKey 传入时直接测草稿密钥（不落库）；留空测当前已保存生效的 Key
   return request('/api/settings/test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider })
+    body: JSON.stringify(apiKey ? { provider, api_key: apiKey } : { provider })
   })
 }
 

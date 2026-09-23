@@ -12,7 +12,7 @@ import InsightsView from './components/InsightsView.vue'
 import ModelSquare from './components/ModelSquare.vue'
 import AccountView from './components/AccountView.vue'
 import AuthModal from './components/AuthModal.vue'
-import { getConversations, getConversation, deleteConversation, streamChat, createPlan, getKbDocuments, getMemories, onUnauthorized } from './api'
+import { getConversations, getConversation, deleteConversation, streamChat, createPlan, getKbDocuments, getMemories, getMe, onUnauthorized } from './api'
 
 /* 视图元信息：顶栏标题 / 徽标 / 占位页页头
    2026-09-20 二次改版：「对话」与「智能体」合并为「智能对话」——
@@ -160,6 +160,12 @@ function onHashChange() {
   if (toApp) applyHashView()  // 返回键回主界面时恢复对应视图
 }
 if (entered.value) applyHashView()  // 刷新 #/app/<view> 直接恢复视图
+/* 头像更新（个人中心画像页上传）：同步本地账号态，全站头像即时生效 */
+function onAvatarUpdated(avatar) {
+  user.value = { ...user.value, avatar }
+  localStorage.setItem('ark_user', JSON.stringify(user.value))
+}
+
 /* 登录 / 注册成功：落盘用户信息，关闭弹窗，进入主界面（固定落在智能对话） */
 function authSuccess(u) {
   user.value = u
@@ -520,6 +526,13 @@ function loadUserData() {
 onMounted(() => {
   window.addEventListener('hashchange', onHashChange)
   loadUserData()
+  // 已登录会话补拉本人资料：让旧 localStorage 账号也能拿到新字段（如头像）
+  if (user.value) {
+    getMe().then(u => {
+      user.value = { ...user.value, ...u }
+      localStorage.setItem('ark_user', JSON.stringify(user.value))
+    }).catch(() => {})
+  }
 })
 onBeforeUnmount(() => {
   window.removeEventListener('hashchange', onHashChange)
@@ -548,6 +561,7 @@ onBeforeUnmount(() => {
           :messages="messages"
           :streaming="streaming"
           :session-title="activeTitle"
+          :user="user"
           :models="MODELS"
           :kb-docs="kbDocs"
           :mem-count="memCount"
@@ -586,6 +600,7 @@ onBeforeUnmount(() => {
           @tab="setAccountTab"
           @navigate="setView"
           @logout="logout"
+          @avatar-updated="onAvatarUpdated"
         />
       </main>
     </div>
