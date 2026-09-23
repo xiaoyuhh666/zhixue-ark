@@ -137,7 +137,7 @@ def extract_and_store(user_id: int, conversation_id: int, provider: str, turns: 
     """
     dialogue = "\n".join(f"{role}: {content}" for role, content in turns)
     try:
-        resp = get_chat_model(provider, temperature=0.1).invoke(
+        resp = get_chat_model(provider, temperature=0.1, user_id=user_id).invoke(
             f"{EXTRACT_PROMPT}\n\n对话片段：\n{dialogue}"
         )
         data = _parse_extract_json(resp.content if isinstance(resp.content, str) else str(resp.content))

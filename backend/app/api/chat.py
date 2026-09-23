@@ -197,7 +197,7 @@ def chat(req: ChatRequest, user: User = Depends(get_current_user)):
                 cur_agent_idx = 0  # 当前正在执行的智能体段下标（agent_start 推进）
                 for mode, payload in build_graph().stream(
                     {"messages": lc_msgs, "context": ctx, "use_kb": req.use_kb,
-                     "kb_doc_ids": kb_scope, "provider": provider},
+                     "kb_doc_ids": kb_scope, "provider": provider, "user_id": user.id},
                     stream_mode=["messages", "updates", "custom"],
                     config={"recursion_limit": 50},
                 ):
@@ -280,6 +280,19 @@ def chat(req: ChatRequest, user: User = Depends(get_current_user)):
                     any(k in low for k in ("429", "1305", "rate limit", "too many requests"))
                     or "访问量过大" in msg
                 )
+                # 兜底：已流式产出的部分内容先落库，刷新后不丢已生成文本
+                if full:
+                    try:
+                        if plan_obj:
+                            plan_obj["tools"] = tools_events
+                        db.add(Message(
+                            conversation_id=conv.id, role="assistant",
+                            agent=agent_label, content=full, model=provider,
+                            citations=citations or None, plan=plan_obj or None,
+                        ))
+                        db.commit()
+                    except Exception:
+                        db.rollback()
                 yield _sse({
                     "type": "error", "message": f"模型调用失败：{msg}",
                     "kind": "rate_limit" if is_rate else "generic",

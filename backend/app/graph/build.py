@@ -73,6 +73,7 @@ class AgentState(TypedDict):
     use_kb: bool  # 知识库检索开关（False 时智能体不绑 kb_search 工具）
     kb_doc_ids: list[int] | None  # 用户勾选的检索范围（None/空 = 全部资料）
     provider: str  # 用户选择的 LLM 供应商（请求级参数，全图所有模型调用跟随）
+    user_id: int  # 请求级用户 id：图内构建模型时解 BYOK 用户级 Key（与 chat.py 预检同源）
 
 
 def parse_supervisor_action(text: str) -> tuple[list[dict], dict | None]:
@@ -123,7 +124,7 @@ def _supervisor_node(state: AgentState) -> dict:
     tasks: list[dict] = [{"agent": "general", "objective": ""}]
     clarify: dict | None = None
     try:
-        resp = get_chat_model(state.get("provider"), temperature=0.1).invoke(inputs)
+        resp = get_chat_model(state.get("provider"), temperature=0.1, user_id=state.get("user_id") or 0).invoke(inputs)
         content = resp.content if isinstance(resp.content, str) else str(resp.content)
         tasks, clarify = parse_supervisor_action(content)
     except Exception:  # 调度失败不阻塞对话，回落通用助手单任务
@@ -176,10 +177,10 @@ def _make_agent_node(key: str):
         if not state.get("use_kb", True):  # 知识库开关关闭：剔除 kb_search
             tools = [t for t in tools if getattr(t, "name", "") != "kb_search"]
         if not tools:  # 无工具智能体：单次生成
-            resp = get_chat_model(state.get("provider"), temperature=0.7).invoke(msgs)
+            resp = get_chat_model(state.get("provider"), temperature=0.7, user_id=state.get("user_id") or 0).invoke(msgs)
             return {"messages": [resp], "outputs": {key: _chunk_text(resp.content)}, "cur": cur + 1}
 
-        model = get_chat_model(state.get("provider"), temperature=0.7).bind_tools(tools)
+        model = get_chat_model(state.get("provider"), temperature=0.7, user_id=state.get("user_id") or 0).bind_tools(tools)
         for _ in range(MAX_TOOL_ROUNDS):
             resp = model.invoke(msgs)
             calls = getattr(resp, "tool_calls", None) or []
@@ -197,7 +198,7 @@ def _make_agent_node(key: str):
                 })
                 msgs.append(ToolMessage(content=result, tool_call_id=call["id"], name=name))
         # 工具轮次耗尽：去掉工具强制收尾，保证一定能给出回答
-        resp = get_chat_model(state.get("provider"), temperature=0.7).invoke(
+        resp = get_chat_model(state.get("provider"), temperature=0.7, user_id=state.get("user_id") or 0).invoke(
             msgs + [SystemMessage(content="请基于以上已获取的信息直接给出最终回答，不要再调用工具。")]
         )
         return {"messages": [resp], "outputs": {key: _chunk_text(resp.content)}, "cur": cur + 1}
@@ -251,7 +252,7 @@ def _synthesizer_node(state: AgentState) -> dict:
     ctx = state.get("context", "")
     if ctx:
         system += "\n\n【用户画像】" + ctx.split("\n")[0]
-    resp = get_chat_model(state.get("provider"), temperature=0.3).invoke(
+    resp = get_chat_model(state.get("provider"), temperature=0.3, user_id=state.get("user_id") or 0).invoke(
         [SystemMessage(content=system)]
         + [SystemMessage(content=f"用户原始问题：{user_q}\n\n各智能体产出：\n{parts}")]
         + state["messages"][-1:]
