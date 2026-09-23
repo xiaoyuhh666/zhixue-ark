@@ -1,11 +1,16 @@
 """智学方舟 后端入口：FastAPI 应用。
 
 启动：uvicorn app.main:app --reload --port 8000（在 backend/ 目录下）
+生产部署：frontend/ 存在 dist/ 时由本服务直接托管（单端口模式），
+评委只访问 http://<服务器IP>:<端口> 一个地址，前后端同域无跨域。
 """
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 
 from .api import agents, auth, chat, conversations, insights, kb, memories, plans, profile, settings
@@ -22,10 +27,16 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="智学方舟 Campus Multi-Agent OS", version="0.1.0", lifespan=lifespan)
 
-# 开发期放开跨域；生产环境再收紧
+# 跨域白名单：Vercel 前端经 VITE_API_BASE 直连本后端 + 本地 Vite 开发服。
+# 正则放行 *.vercel.app 预览部署域名；单端口部署（同域托管 frontend/dist）不经过 CORS。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://zhixue-ark.vercel.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -71,3 +82,23 @@ def stats():
         }
     finally:
         db.close()
+
+
+# ---- 前端托管（生产部署）：frontend/dist 存在时单端口服务整个平台 ----
+_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+
+if (_DIST / "index.html").exists():
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        """SPA 回落：静态文件存在则返回文件，否则回落 index.html（前端 hash 路由）。
+
+        /api 前缀不托管——未匹配到 API 路由的 /api/* 请求应保持 404 语义。
+        """
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = _DIST / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_DIST / "index.html")

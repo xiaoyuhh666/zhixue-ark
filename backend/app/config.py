@@ -27,8 +27,10 @@ class Settings(BaseSettings):
     GLM_MODEL: str = "glm-4-flash"
     FALLBACK_PROVIDER: str = "glm"  # 免费兜底供应商：所选模型未接入时自动切换
 
-    # ---- 知识库 RAG（里程碑 4，CPU-only）----
-    KB_EMBED_MODEL: str = "BAAI/bge-m3"  # HuggingFace 嵌入模型，可换 bge-small-zh-v1.5 提速
+    # ---- 知识库 RAG（里程碑 4；嵌入走智谱 API，复用 GLM_API_KEY/GLM_BASE_URL）----
+    KB_EMBED_MODEL: str = "embedding-3"  # 智谱嵌入模型（OpenAI 兼容 /embeddings）
+    KB_EMBED_DIMENSIONS: int = 1024  # 输出向量维度；0 = 用模型默认（embedding-3 默认 2048）
+    KB_EMBED_BATCH: int = 16  # 单次嵌入请求的最大文本条数（智谱上限 64，留余量）
     KB_CHUNK_SIZE: int = 500  # 每块目标字符数
     KB_CHUNK_OVERLAP: int = 80  # 相邻块重叠字符数
     KB_TOP_K: int = 3  # 检索返回条数

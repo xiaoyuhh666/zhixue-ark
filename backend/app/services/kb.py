@@ -1,50 +1,47 @@
-"""知识库服务（里程碑 4）：文档解析 -> 分块 -> CPU 嵌入 -> ChromaDB 检索。
+"""知识库服务（里程碑 4）：文档解析 -> 分块 -> API 嵌入 -> ChromaDB 检索。
 
 设计要点：
-- 嵌入模型惰性加载（首次使用才载入内存，device='cpu'）
-- ChromaDB 持久化在 backend/data/chroma，collection 按余弦距离建索引
+- 嵌入走智谱 embedding-3（OpenAI 兼容 /embeddings，复用 GLM_API_KEY），不再本地加载模型
+  —— 免去 torch/sentence-transformers 依赖与 ~2GB 内存，Render 免费层 512MB 稳定运行
+- 分批请求（智谱单请求上限 64 条）+ L2 归一化，返回顺序与输入一致
+- ChromaDB 持久化在 backend/data/chroma，collection 按余弦距离建索引，
+  名称带嵌入模型标识：换嵌入模型即换集合，新旧维度自动隔离不冲突
 - 引用溯源：每个向量块带 doc_id 元数据，检索命中即可回溯到文档名与原文片段
 """
-import os
-import threading
-
 from ..config import get_settings
 from ..models import KnowledgeDoc
-
-# HuggingFace 直连在国内网络常超时，默认走镜像；Xet 协议镜像不代理，一并禁用。
-# 用户已显式配置时不覆盖。
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 # 解析后拼接段落时的分隔符
 _PARA_SEP = "\n"
 
-# 惰性加载的嵌入模型（进程内单例，避免并发重复加载）
-_model = None
-_model_lock = threading.Lock()
+# 惰性单例的嵌入客户端（进程内复用 HTTP 连接池，避免并发重复创建）
+_client = None
 
 
-def _get_model():
-    """懒加载 SentenceTransformer 嵌入模型（CPU）。"""
-    global _model
-    if _model is None:
-        with _model_lock:
-            if _model is None:  # 双重检查，防止并发重复加载
-                from sentence_transformers import SentenceTransformer
+def _get_client():
+    """懒加载智谱嵌入客户端（OpenAI 兼容协议）。"""
+    global _client
+    if _client is None:
+        from openai import OpenAI
 
-                s = get_settings()
-                _model = SentenceTransformer(s.KB_EMBED_MODEL, device="cpu")
-    return _model
+        s = get_settings()
+        if not s.GLM_API_KEY:
+            raise RuntimeError("未配置智谱 API Key（GLM_API_KEY），知识库嵌入不可用")
+        _client = OpenAI(api_key=s.GLM_API_KEY, base_url=s.GLM_BASE_URL)
+    return _client
 
 
 def _get_collection():
-    """获取 ChromaDB 集合（余弦距离，持久化）。"""
+    """获取 ChromaDB 集合（余弦距离，持久化）；名称带嵌入模型标识。"""
+    import re
+
     import chromadb
 
     s = get_settings()
+    safe = re.sub(r"[^A-Za-z0-9_-]", "-", s.KB_EMBED_MODEL).strip("-") or "default"
     client = chromadb.PersistentClient(path=s.CHROMA_DIR)
     return client.get_or_create_collection(
-        name="zhixue_kb",
+        name=f"zhixue_kb_{safe}",
         metadata={"hnsw:space": "cosine"},
     )
 
@@ -162,10 +159,37 @@ def split_chunks(text: str, size: int | None = None, overlap: int | None = None)
 # ---------- 入库 / 检索 / 删除 ----------
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """批量嵌入（CPU），返回归一化向量列表。"""
-    model = _get_model()
-    vecs = model.encode(texts, normalize_embeddings=True, batch_size=8)
-    return [v.tolist() for v in vecs]
+    """批量嵌入：调智谱 embedding API，分批请求，返回 L2 归一化向量列表。
+
+    请求按 KB_EMBED_BATCH 分批；兼容实现可能乱序返回，按 index 回填保证顺序一致。
+    L2 归一化与旧本地模型行为对齐，保证 KB_MIN_SCORE 余弦阈值语义不变。
+    """
+    if not texts:
+        return []
+    s = get_settings()
+    client = _get_client()
+    vecs: list[list[float]] = []
+    for i in range(0, len(texts), s.KB_EMBED_BATCH):
+        batch = texts[i : i + s.KB_EMBED_BATCH]
+        kwargs = {"model": s.KB_EMBED_MODEL, "input": batch}
+        if s.KB_EMBED_DIMENSIONS > 0:
+            kwargs["dimensions"] = s.KB_EMBED_DIMENSIONS
+        resp = client.embeddings.create(**kwargs)
+        batch_vecs: list[list[float] | None] = [None] * len(batch)
+        for item in resp.data:
+            batch_vecs[item.index] = item.embedding
+        if any(v is None for v in batch_vecs):
+            raise RuntimeError("嵌入接口返回数据不完整")
+        vecs.extend(batch_vecs)
+    return [_l2_normalize(v) for v in vecs]
+
+
+def _l2_normalize(vec: list[float]) -> list[float]:
+    """L2 归一化（纯 Python，避免为此引入 numpy）。"""
+    norm = sum(x * x for x in vec) ** 0.5
+    if norm == 0:
+        return vec
+    return [x / norm for x in vec]
 
 
 def add_document(doc: KnowledgeDoc, text: str) -> int:
