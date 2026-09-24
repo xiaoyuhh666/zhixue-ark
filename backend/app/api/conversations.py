@@ -86,7 +86,9 @@ def get_conversation(conv_id: int, user=Depends(get_current_user), db: Session =
             "plan": m.plan,  # 里程碑 6：任务规划与分段，用于历史回放
             "created_at": m.created_at.isoformat() if m.created_at else None,
         }
+        # 过滤空气占位行：断流瞬间生成的占位行可能尚未被清扫，不渲染
         for m in sorted(conv.messages, key=lambda x: x.id)
+        if not (m.role == "assistant" and not m.content)
     ]
     return data
 

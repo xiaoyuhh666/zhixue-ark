@@ -12,6 +12,7 @@ SSE 帧协议：
 """
 import json
 import threading
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -114,6 +115,14 @@ def chat(req: ChatRequest, user: User = Depends(get_current_user)):
             yield _sse({"type": "error", "message": notice})
             return
         db: Session = SessionLocal()
+        full = ""  # 累计生成文本：finally 断流兜底落库用，须先于 try 初始化
+        # 以下状态先于 try 初始化：断流兜底(finally)可能早于原定义点触发
+        agent_label = "智学方舟"
+        citations: list[dict] = []
+        segments: list[dict] = []
+        plan_obj: dict | None = None
+        tools_events: list[dict] = []
+        assistant = None  # 助手回复占位行引用：先占位拿 id，流结束再填内容
         try:
             # 0. 未配置密钥：直接报错提示（运行时 Key 优先于 .env，用户级键隔离）
             user_key = runtime_settings.user_scope(user.id, f"{provider}_api_key")
@@ -154,14 +163,70 @@ def chat(req: ChatRequest, user: User = Depends(get_current_user)):
             else:
                 kb_scope = user_doc_ids  # 空 = 本人无文档，工具检索自然返回空
 
-            # 2. 保存用户消息
+            # 2. 保存用户消息 + 预留助手回复占位行：回复的 id 在下一轮用户消息
+            #    之前就分配好，即使中途断流（刷新/切换会话）后立刻再发消息，
+            #    刷新后按 id 排序也不会出现「回复挂到下一问下面」的错位。
+            #    只清扫 30 分钟前的陈旧空气泡行（断流时 finally 依赖 GC 时机不保证
+            #    及时；绝不碰进行中会话的占位行——SQLite rowid 复用会让旧对象的
+            #    UPDATE 串写新插入的用户消息，血泪教训）
+            db.query(Message).filter(
+                Message.conversation_id == conv.id,
+                Message.role == "assistant",
+                Message.content == "",
+                Message.created_at < datetime.utcnow() - timedelta(minutes=30),
+            ).delete(synchronize_session=False)
             db.add(Message(conversation_id=conv.id, role="user", content=req.message))
+            assistant = Message(
+                conversation_id=conv.id, role="assistant", content="", model=provider
+            )
+            db.add(assistant)
             db.commit()
+            db.refresh(assistant)
 
-            # 3. 组装上下文（最近历史 -> LangChain 消息）
+            def _finalize_assistant():
+                """占位行定稿为正式回复，返回 done 帧用的 message_id。
+
+                更新带 content=='' 守卫：占位行只允许被自己的流填充，
+                防止极端并发下 rowid 复用导致旧流串写新消息。占位行若已消失
+                （被清扫或会话被删），改为插入新行保全内容。
+                """
+                nonlocal assistant
+                mid = assistant.id if assistant is not None else None
+                if plan_obj:
+                    plan_obj["tools"] = tools_events  # 工具事件一并持久化，回放时间线用
+                if not full:  # 模型没吐任何内容：删占位行防空气泡
+                    if mid:
+                        db.query(Message).filter(
+                            Message.id == mid, Message.content == ""
+                        ).delete(synchronize_session=False)
+                        db.commit()
+                    assistant = None
+                    return None
+                vals = {
+                    "agent": agent_label, "content": full,
+                    "citations": citations or None, "plan": plan_obj or None,
+                }
+                if mid:
+                    n = db.query(Message).filter(
+                        Message.id == mid, Message.content == ""
+                    ).update(vals, synchronize_session=False)
+                    if n:
+                        db.commit()
+                        assistant = None
+                        return mid
+                # 占位行已不在：插新行保全内容（极端场景顺序可能靠后，不丢数据优先）
+                obj = Message(conversation_id=conv.id, role="assistant", model=provider, **vals)
+                db.add(obj)
+                db.commit()
+                db.refresh(obj)
+                assistant = None
+                return obj.id
+
+            # 3. 组装上下文（最近历史 -> LangChain 消息）；排除空气占位行
             history = (
                 db.query(Message)
                 .filter_by(conversation_id=conv.id)
+                .filter(Message.content != "")
                 .order_by(Message.id)
                 .all()
             )
@@ -190,12 +255,6 @@ def chat(req: ChatRequest, user: User = Depends(get_current_user)):
             # 里程碑 6：知识库检索改为智能体工具调用（kb_search），不再全局前置注入
 
             # 4. 生成回复：Supervisor 调度图 -> 顺序多智能体协作 -> 汇总，全程流式推送
-            full = ""
-            agent_label = "智学方舟"
-            citations: list[dict] = []
-            segments: list[dict] = []  # 分段产出 [{agent, label, content}]
-            plan_obj: dict | None = None
-            tools_events: list[dict] = []  # 工具调用事件（持久化到 plan 供回放）
             try:
                 node_to_index: dict[str, int] = {}
                 cur_agent_idx = 0  # 当前正在执行的智能体段下标（agent_start 推进）
@@ -284,37 +343,22 @@ def chat(req: ChatRequest, user: User = Depends(get_current_user)):
                     any(k in low for k in ("429", "1305", "rate limit", "too many requests"))
                     or "访问量过大" in msg
                 )
-                # 兜底：已流式产出的部分内容先落库，刷新后不丢已生成文本
-                if full:
-                    try:
-                        if plan_obj:
-                            plan_obj["tools"] = tools_events
-                        db.add(Message(
-                            conversation_id=conv.id, role="assistant",
-                            agent=agent_label, content=full, model=provider,
-                            citations=citations or None, plan=plan_obj or None,
-                        ))
-                        db.commit()
-                    except Exception:
-                        db.rollback()
+                # 兜底：守卫式定稿占位行——有部分内容就落库（刷新后不丢已生成
+                # 文本），完全没内容就删占位行（避免刷新后出现空气泡）
+                try:
+                    _finalize_assistant()
+                except Exception:
+                    db.rollback()
                 yield _sse({
                     "type": "error", "message": f"模型调用失败：{msg}",
                     "kind": "rate_limit" if is_rate else "generic",
                 })
                 return
 
-            # 5. 保存助手消息（记录来源智能体、RAG 引用与任务计划分段）
-            if plan_obj:
-                plan_obj["tools"] = tools_events  # 工具事件一并持久化，回放时间线用
-            assistant = Message(
-                conversation_id=conv.id, role="assistant",
-                agent=agent_label, content=full, model=provider,
-                citations=citations or None,
-                plan=plan_obj or None,
-            )
-            db.add(assistant)
-            db.commit()
-            yield _sse({"type": "done", "message_id": assistant.id})
+            # 5. 守卫式定稿占位行（记录来源智能体、RAG 引用与任务计划分段）：
+            #    content=='' 条件更新保证只填充自己的占位行，rowid 被复用也不会串写
+            done_id = _finalize_assistant()
+            yield _sse({"type": "done", "message_id": done_id})
 
             # 6. 后台线程提炼画像与记忆（不阻塞响应）
             threading.Thread(
@@ -323,6 +367,17 @@ def chat(req: ChatRequest, user: User = Depends(get_current_user)):
                 daemon=True,
             ).start()
         finally:
+            try:
+                # 断流兜底：生成器被中断（用户刷新/切换会话）且占位行未定稿时，
+                # 守卫式定稿——有部分内容就落库部分内容，没有就删占位行；
+                # content=='' 守卫确保绝不串写已被复用的 rowid
+                if assistant is not None:
+                    _finalize_assistant()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             db.close()
 
     return StreamingResponse(
