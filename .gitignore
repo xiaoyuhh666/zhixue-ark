@@ -17,6 +17,7 @@ backend/data/
 
 # ---- 本地文档（评审材料单独提交，不入仓库）----
 产品文档.md
+prototype.html
 
 # ---- 前端构建产物与依赖 ----
 node_modules/
