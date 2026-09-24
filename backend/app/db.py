@@ -18,22 +18,26 @@ def _resolve_db_url() -> tuple[str, bool]:
     """解析最终连接串。返回 (url, is_local_sqlite)。
 
     Turso 官方 SQLAlchemy 方言（sqlalchemy-libsql）走 sqlite+libsql:// 方案，
-    连接串形如 sqlite+libsql://<host>?authToken=<token>&secure=true。
+    按 PyPI 官方示例：host 部分只放主机名，?secure=true 开启 TLS，
+    authToken 必须通过 connect_args={"auth_token": ...} 传递（放 URL 里方言不认）。
     """
     if settings.TURSO_DATABASE_URL:
         host = settings.TURSO_DATABASE_URL.split("://", 1)[-1].rstrip("/")
-        return (
-            f"sqlite+libsql://{host}?authToken={settings.TURSO_AUTH_TOKEN}&secure=true",
-            False,
-        )
+        return f"sqlite+libsql://{host}?secure=true", False
     return settings.DATABASE_URL, settings.DATABASE_URL.startswith("sqlite")
 
 
 DB_URL, IS_LOCAL_SQLITE = _resolve_db_url()
 
-# 禁用同线程限制：FastAPI 线程池跨线程使用连接池（本地 SQLite 与远端 libSQL 均支持该参数）
-connect_args = {"check_same_thread": False}
-engine = create_engine(DB_URL, connect_args=connect_args)
+# 本地 SQLite 需要 check_same_thread=False 允许跨线程；
+# 远端 libSQL 方言不认该参数（会导致启动即崩），连接池本身保证跨线程安全
+if IS_LOCAL_SQLITE:
+    engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+else:
+    _conn_kwargs = {}
+    if settings.TURSO_AUTH_TOKEN:
+        _conn_kwargs["auth_token"] = settings.TURSO_AUTH_TOKEN
+    engine = create_engine(DB_URL, connect_args=_conn_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
