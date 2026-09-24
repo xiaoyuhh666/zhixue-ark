@@ -267,8 +267,11 @@ async function selectConversation(id) {
 }
 
 /* 拉取会话消息并回放（左栏选择与 hash 恢复共用）；
-   竞态保护：响应返回时用户已切走（activeId 变化）则丢弃本次结果 */
-async function loadConversationData(id) {
+   竞态保护：响应返回时用户已切走（activeId 变化）则丢弃本次结果。
+   线上（Vercel+Render）刷新瞬间会并发 5 个请求，国内链路偶发连接被掐
+   （SSL EOF / 连接重置 / 5xx），会话详情是刷新恢复的关键请求且无重试，
+   挂掉就表现为「对话消失，只能去历史里点」——这里自动重试最多 2 次 */
+async function loadConversationData(id, retried = 0) {
   try {
       const data = await getConversation(id)
       if (activeId.value !== id) return
@@ -316,6 +319,13 @@ async function loadConversationData(id) {
       })
       upsertConversation(data.id, data.title)
     } catch (e) {
+      /* 用户已切走（activeId 变化）或认证类错误（登录框已弹出）：静默放弃；
+         其余失败按 1.2s / 2.5s 退避重试，两次仍失败才报错 */
+      if (activeId.value !== id || e?.auth) return
+      if (retried < 2) {
+        setTimeout(() => loadConversationData(id, retried + 1), retried === 0 ? 1200 : 2500)
+        return
+      }
       ElMessage.error(e?.message || '加载会话失败')
     }
 }
