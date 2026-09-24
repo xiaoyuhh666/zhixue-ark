@@ -108,24 +108,63 @@ cd frontend && npm install && npm run dev
 
 ```
 zhixue-ark/
-├── frontend/                    # Vue 3 + Vite 前端
-│   ├── src/
-│   │   ├── App.vue              # 智能对话主页面
-│   │   ├── api.js               # 请求 / SSE / 上传 / 鉴权封装
-│   │   └── components/          # 着陆页 / 知识库 / 计划 / 足迹 / 模型广场 / 个人中心等
-│   └── vercel.json              # /api 反向代理
+├── frontend/                        # Vue 3 + Vite 前端
+│   ├── index.html
+│   ├── package.json
+│   ├── vite.config.js               # 开发服务器（/api 代理到 8000）
+│   ├── vercel.json                  # 生产环境 /api 反代到 Render
+│   └── src/
+│       ├── main.js                  # 应用入口
+│       ├── App.vue                  # 应用外壳 + 智能对话主页面
+│       ├── api.js                   # 请求 / SSE 流式 / 上传 / 鉴权统一封装
+│       ├── style.css                # 全局样式（白色柔粉视觉体系）
+│       └── components/
+│           ├── LandingView.vue      # 着陆页
+│           ├── PlayChat.vue         # 着陆页试玩对话
+│           ├── AbilityMarquee.vue   # 能力展示横幅
+│           ├── StepFlow.vue         # 使用步骤引导
+│           ├── AuthModal.vue        # 注册 / 登录弹窗
+│           ├── TopNav.vue           # 顶部导航
+│           ├── PageHeader.vue       # 内页页头
+│           ├── ChatView.vue         # 对话主视图（调度时间线 / 引用角标）
+│           ├── ChatConfig.vue       # 对话配置条（模型 / 记忆 / 知识库开关）
+│           ├── KnowledgeView.vue    # 知识库（上传 / 分块管理 / 检索试验台）
+│           ├── PlansView.vue        # 任务计划（待办聚焦）
+│           ├── InsightsView.vue     # 学习足迹（14 天趋势 / 使用分布）
+│           ├── ModelSquare.vue      # 模型广场
+│           ├── AccountView.vue      # 个人中心（画像 / 记忆 / 图鉴 / 模型管理）
+│           ├── ProfileView.vue      # 我的画像
+│           └── MemoryView.vue       # 长期记忆
 ├── backend/
-│   ├── app/
-│   │   ├── main.py              # FastAPI 入口（亦可托管 dist 单端口部署）
-│   │   ├── config.py            # pydantic-settings 读取 .env
-│   │   ├── db.py                # Turso 优先 / 本地 SQLite 回落
-│   │   ├── graph/               # LangGraph 调度图（Supervisor / 领域智能体 / 工具）
-│   │   ├── api/                 # auth / chat / conversations / kb / plans / memories / profile / insights / settings
-│   │   ├── services/            # RAG（kb.py）/ 画像 / 运行时设置
-│   │   └── llm/                 # OpenAI 兼容客户端
 │   ├── requirements.txt
-│   └── .env.example             # 环境变量模板
-└── 启动平台.bat                  # Windows 一键启动
+│   ├── .env.example                 # 环境变量模板（复制为 .env 使用）
+│   └── app/
+│       ├── main.py                  # FastAPI 入口（亦可托管 dist 单端口部署）
+│       ├── config.py                # pydantic-settings 读取 .env
+│       ├── db.py                    # Turso 优先 / 本地 SQLite 回落
+│       ├── models.py                # ORM 模型（用户 / 会话 / 消息 / 记忆 / 知识文档）
+│       ├── api/                     # REST + SSE 路由
+│       │   ├── auth.py              # 注册 / 登录 / 当前用户
+│       │   ├── chat.py              # 对话 SSE 主链路 + Key 解析 + 平台配额
+│       │   ├── conversations.py     # 会话与消息管理
+│       │   ├── kb.py                # 知识库上传 / 文档管理 / 检索试验
+│       │   ├── plans.py             # 任务计划
+│       │   ├── memories.py          # 长期记忆
+│       │   ├── profile.py           # 用户画像（含头像上传）
+│       │   ├── insights.py          # 学习足迹统计
+│       │   ├── settings.py          # 模型设置 / BYOK / 连通测试
+│       │   └── agents.py            # 智能体图鉴
+│       ├── graph/                   # LangGraph 调度图
+│       │   ├── build.py             # Supervisor → 条件路由 → 汇总
+│       │   ├── agents.py            # 六位智能体人设与节点
+│       │   └── tools.py             # kb_search 向量检索 / python_calc 安全求值
+│       ├── services/
+│       │   ├── kb.py                # RAG：解析分块 / embedding-3 嵌入 / 向量检索
+│       │   ├── profile.py           # 画像与记忆提炼
+│       │   └── runtime_settings.py  # 运行时 Key / 平台配额
+│       └── llm/
+│           └── client.py            # OpenAI 兼容客户端（三家供应商可切换）
+└── 启动平台.bat                      # Windows 一键启动
 ```
 
 ---
