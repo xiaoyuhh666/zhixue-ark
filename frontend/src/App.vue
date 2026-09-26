@@ -218,11 +218,47 @@ const activeTitle = computed(
 )
 
 function abortStream() {
-  if (abortCtl) {
-    abortCtl.abort()
+  /* 先停打字机（会经 finish 置 abortCtl=null），再中断 fetch：
+     必须先取引用，否则 abort 逻辑被跳过 */
+  const ctl = abortCtl
+  typeAbort()
+  if (ctl) {
+    ctl.abort()
     abortCtl = null
   }
   streaming.value = false
+}
+
+/* ---- 打字机播放器（2026-09-26）----
+   实测 SSE delta 为突发到达（DeepSeek API 批量下发 + 跨境网络抖动），
+   直接渲染观感是「一段一段蹦」。改为：delta 入队，节拍器按固定节奏
+   匀速放出；积压越多播放越快（长回复不拖尾）。done 帧后等队列播完
+   才收尾；手动停止/切会话/报错时立即放完或丢弃，数据不丢 */
+const TYPE_TICK = 25   // 播放节拍 ms
+const TYPE_STEP = 2    // 每拍最少播放字符数（下限 ≈80 字/秒）
+let typeQueue = []     // 待播放片段 [{content, index}]，index 为分段下标
+let typeMsg = null     // 当前播放目标气泡
+let typeTimer = null   // 节拍器句柄
+let typeFinish = null  // 队列排空后的收尾回调（sendMessage 注入）
+
+function typeFlushInstant() {
+  /* 立即放完剩余队列（中断时保数据可见，需在 typeMsg 置空前调用） */
+  if (typeMsg) {
+    for (const c of typeQueue) {
+      if (c.index != null && typeMsg.segments[c.index]) typeMsg.segments[c.index].content += c.content
+      typeMsg.content += c.content
+    }
+  }
+  typeQueue = []
+}
+
+function typeAbort() {
+  if (typeTimer) { clearInterval(typeTimer); typeTimer = null }
+  typeFlushInstant()
+  typeMsg = null
+  const fin = typeFinish
+  typeFinish = null
+  fin?.()
 }
 
 function upsertConversation(id, title, lastMessage) {
@@ -369,6 +405,50 @@ async function sendMessage(text) {
     segments: []
   }
   messages.value.push(aiMsg)
+  /* 关键：aiMsg 是推入前的原始对象，直接改它不触发 Vue 重渲染（流式文字
+     只会在其他响应式变更时整段蹦出来）。必须持有数组内的响应式代理，
+     后续所有字段变更都走 msg */
+  const msg = messages.value[messages.value.length - 1]
+
+  /* 打字机接线：delta 入队匀速播放，队列排空才真正收尾（见下方节拍器） */
+  let streamEnded = false
+  let finished = false
+  const stopTyping = () => {
+    if (typeTimer) { clearInterval(typeTimer); typeTimer = null }
+    typeQueue = []
+    typeMsg = null
+    typeFinish = null
+  }
+  const finish = () => {
+    if (finished) return
+    finished = true
+    stopTyping()
+    msg.streaming = false
+    msg.steps.forEach(s => { if (s.status === 'active' || s.status === 'pending') s.status = 'done' })
+    streaming.value = false
+    abortCtl = null
+  }
+  typeMsg = msg
+  typeFinish = finish
+  typeTimer = setInterval(() => {
+    if (!typeQueue.length) {
+      if (streamEnded) finish()
+      return
+    }
+    /* 自适应节奏：积压越多播得越快（约 50 拍≈1.25s 排空），长回复不拖尾 */
+    const backlog = typeQueue.reduce((a, c) => a + c.content.length, 0)
+    let n = Math.max(TYPE_STEP, Math.ceil(backlog / 50))
+    while (n > 0 && typeQueue.length) {
+      const c = typeQueue[0]
+      const take = Math.min(n, c.content.length)
+      const part = c.content.slice(0, take)
+      c.content = c.content.slice(take)
+      if (c.index != null && msg.segments[c.index]) msg.segments[c.index].content += part
+      msg.content += part
+      if (!c.content) typeQueue.shift()
+      n -= take
+    }
+  }, TYPE_TICK)
 
   try {
     await streamChat(
@@ -386,85 +466,95 @@ async function sendMessage(text) {
           }
         } else if (ev.type === 'plan') {
           // 任务规划（里程碑 6）：构建任务链时间线；存 tasks 供「转为计划」按钮（任务计划中心）
-          aiMsg.plan = { tasks: ev.tasks || [] }
-          aiMsg.agent = (ev.tasks?.length > 1) ? '多智能体协作' : (ev.tasks?.[0]?.label || '智学方舟')
-          aiMsg.reason = ev.reason || ''
-          const route = aiMsg.steps.find(s => s.key === 'route')
+          msg.plan = { tasks: ev.tasks || [] }
+          msg.agent = (ev.tasks?.length > 1) ? '多智能体协作' : (ev.tasks?.[0]?.label || '智学方舟')
+          msg.reason = ev.reason || ''
+          const route = msg.steps.find(s => s.key === 'route')
           if (route) route.status = 'done'
-          aiMsg.steps = aiMsg.steps.filter(s => s.key !== 'gen')
-          ;(ev.tasks || []).forEach((task, i) => aiMsg.steps.push({
+          msg.steps = msg.steps.filter(s => s.key !== 'gen')
+          ;(ev.tasks || []).forEach((task, i) => msg.steps.push({
             key: `task-${i}`,
             label: `${task.label}${task.objective ? ' · ' + task.objective : ''}`,
             status: i === 0 ? 'active' : 'pending'
           }))
           if (ev.tasks?.length > 1) {
-            aiMsg.steps.push({ key: 'synth', label: '调度智能体 · 汇总整合', status: 'pending' })
+            msg.steps.push({ key: 'synth', label: '调度智能体 · 汇总整合', status: 'pending' })
           }
         } else if (ev.type === 'status') {
           // 兜底切换等系统提示：作为时间线步骤展示，不产生正文
-          aiMsg.steps.push({ key: `status-${aiMsg.steps.length}`, label: ev.message || '系统提示', status: 'done' })
+          msg.steps.push({ key: `status-${msg.steps.length}`, label: ev.message || '系统提示', status: 'done' })
         } else if (ev.type === 'agent_start') {
           // 任务开始：推进时间线并建分段
           const idx = ev.index ?? 0
-          const act = aiMsg.steps.find(s => s.status === 'active')
+          const act = msg.steps.find(s => s.status === 'active')
           if (act) act.status = 'done'
-          const step = aiMsg.steps.find(s => s.key === `task-${idx}` || s.key === 'synth')
+          const step = msg.steps.find(s => s.key === `task-${idx}` || s.key === 'synth')
           if (step) step.status = 'active'
-          while (aiMsg.segments.length <= idx) aiMsg.segments.push({ agent: '', label: '', content: '' })
-          aiMsg.segments[idx] = { agent: ev.agent, label: ev.agent, content: '' }
+          while (msg.segments.length <= idx) msg.segments.push({ agent: '', label: '', content: '' })
+          msg.segments[idx] = { agent: ev.agent, label: ev.agent, content: '' }
         } else if (ev.type === 'tool') {
           // 工具调用（里程碑 6）：在当前任务步骤前插入工具步骤
           const labelMap = { kb_search: '知识检索', python_calc: '计算工具' }
-          const step = { key: `tool-${aiMsg.steps.length}-${ev.name}`, label: `${labelMap[ev.name] || ev.name} · ${ev.summary || '执行完成'}`, status: 'done' }
-          const ai = aiMsg.steps.findIndex(s => s.status === 'active')
-          if (ai >= 0) aiMsg.steps.splice(ai, 0, step)
-          else aiMsg.steps.push(step)
+          const step = { key: `tool-${msg.steps.length}-${ev.name}`, label: `${labelMap[ev.name] || ev.name} · ${ev.summary || '执行完成'}`, status: 'done' }
+          const ai = msg.steps.findIndex(s => s.status === 'active')
+          if (ai >= 0) msg.steps.splice(ai, 0, step)
+          else msg.steps.push(step)
         } else if (ev.type === 'clarify') {
           // 澄清追问（里程碑 7）：调度智能体反问，无任务规划与分段
-          aiMsg.agent = '调度智能体'
-          aiMsg.reason = ev.reason || '需要澄清'
-          aiMsg.clarify = { questions: ev.questions || [] }
-          const route = aiMsg.steps.find(s => s.key === 'route')
+          msg.agent = '调度智能体'
+          msg.reason = ev.reason || '需要澄清'
+          msg.clarify = { questions: ev.questions || [] }
+          const route = msg.steps.find(s => s.key === 'route')
           if (route) route.status = 'done'
-          aiMsg.steps.push({ key: 'clarify', label: '调度智能体 · 澄清追问', status: 'done' })
+          msg.steps.push({ key: 'clarify', label: '调度智能体 · 澄清追问', status: 'done' })
         } else if (ev.type === 'citations') {
           // RAG 命中：挂到当前助手消息上展示引用角标（时间线步骤由 tool 帧负责）
-          aiMsg.citations = ev.items || []
+          msg.citations = ev.items || []
         } else if (ev.type === 'delta') {
-          if (ev.index != null && aiMsg.segments[ev.index]) {
-            aiMsg.segments[ev.index].content += ev.content || ''
-          }
-          aiMsg.content += ev.content || ''
+          /* 入队匀速播放（打字机），不直接上屏 */
+          typeQueue.push({ content: ev.content || '', index: ev.index })
         } else if (ev.type === 'done') {
-          aiMsg.id = ev.message_id
-          aiMsg.streaming = false
-          aiMsg.steps.forEach(s => { if (s.status === 'active' || s.status === 'pending') s.status = 'done' })
+          msg.id = ev.message_id
+          streamEnded = true  // 等播放队列排空后由节拍器收尾
         } else if (ev.type === 'error') {
-          aiMsg.streaming = false
-          aiMsg.steps.forEach(s => { if (s.status === 'active') s.status = 'fail' })
+          /* 错误立即呈现：清空播放队列与节拍器 */
+          stopTyping()
+          finished = true
+          msg.streaming = false
+          msg.steps.forEach(s => { if (s.status === 'active') s.status = 'fail' })
           if (ev.kind === 'rate_limit') {
             /* 限流：气泡内渲染「换模型重试」错误卡，不弹 toast */
-            aiMsg.error_kind = 'rate_limit'
-            aiMsg.content = (ev.message || '当前模型限流，请稍后重试').replace(/^模型调用失败：/, '')
+            msg.error_kind = 'rate_limit'
+            msg.content = (ev.message || '当前模型限流，请稍后重试').replace(/^模型调用失败：/, '')
           } else {
-            if (!aiMsg.content) aiMsg.content = `抱歉，本次请求出现问题：${ev.message || '未知错误'}`
+            if (!msg.content) msg.content = `抱歉，本次请求出现问题：${ev.message || '未知错误'}`
             ElMessage.error(ev.message || '服务异常')
           }
+          streaming.value = false
+          abortCtl = null
         }
       },
       abortCtl.signal
     )
   } catch (e) {
     if (!abortCtl?.signal?.aborted && e?.name !== 'AbortError') {
-      aiMsg.streaming = false
-      aiMsg.steps.forEach(s => { if (s.status === 'active') s.status = 'fail' })
-      if (!aiMsg.content) aiMsg.content = '抱歉，本次请求出现问题：网络异常，请稍后重试'
+      typeFlushInstant()  // 已接收未播放的文本一并呈现，防丢
+      stopTyping()
+      finished = true
+      msg.streaming = false
+      msg.steps.forEach(s => { if (s.status === 'active') s.status = 'fail' })
+      if (!msg.content) msg.content = '抱歉，本次请求出现问题：网络异常，请稍后重试'
       ElMessage.error(e?.message || '网络错误')
+      streaming.value = false
+      abortCtl = null
     }
   } finally {
-    aiMsg.streaming = false
-    streaming.value = false
-    abortCtl = null
+    /* 流已关闭：队列未播完则由节拍器在排空后收尾（done 帧已置 streamEnded），
+       已播完/无正文（clarify、错误、中断）则立即收尾 */
+    if (!finished) {
+      if (typeQueue.length) streamEnded = true
+      else finish()
+    }
   }
 }
 
